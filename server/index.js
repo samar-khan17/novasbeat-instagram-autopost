@@ -8,10 +8,19 @@ import { fileURLToPath } from 'url';
 import path    from 'path';
 import fs      from 'fs';
 
+import sharp from 'sharp';
 import { initDatabase, getSettings } from './database.js';
 import routes  from './routes.js';
 import { startScheduler }  from './scheduler.js';
 import { startAutoScrape } from './scraper.js';
+
+// ── Low-memory image processing (Render free tier = 512MB) ──────────
+// Without these, building the branded 1080 graphic + story with sharp
+// spikes memory and the process gets OOM-killed mid-post (leaving the
+// article stuck as "scheduled"). cache(false) drops sharp's libvips
+// operation cache; concurrency(1) processes one image at a time.
+sharp.cache(false);
+sharp.concurrency(1);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // DOTENV_PATH is set by the Electron main process in packaged mode
