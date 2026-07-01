@@ -1,0 +1,38 @@
+# ── Render Blueprint — deploys the NovasBeat Instagram auto-poster 24/7 ──
+# Render reads this file and auto-configures the service. Secrets (sync:false)
+# are entered once in the Render dashboard — they are NOT stored in the repo.
+services:
+  - type: web
+    name: novasbeat-instagram
+    runtime: node
+    plan: free
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api
+    autoDeploy: true
+    envVars:
+      # ── Non-secret config (safe to keep here) ──
+      - key: IG_GRAPH_BASE
+        value: https://graph.instagram.com
+      - key: IG_GRAPH_VERSION
+        value: v21.0
+      - key: SUPABASE_URL
+        value: https://hktzbncufhmapxqleasd.supabase.co
+      - key: NEWS_WEBSITE_URL
+        value: https://novasbeat.com
+      # ── Secrets — paste the values from newspost-auto/.env in the Render dashboard ──
+      - key: PAGE_ACCESS_TOKEN
+        sync: false
+      - key: INSTAGRAM_ACCOUNT_ID
+        sync: false
+      - key: NVIDIA_KEY_1
+        sync: false
+      - key: NVIDIA_KEY_2
+        sync: false
+      - key: NVIDIA_KEY_3
+        sync: false
+      - key: GROK_API_KEY
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false

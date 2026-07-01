@@ -1,0 +1,18 @@
+node_modules/
+**/node_modules/
+.env
+.env.*
+!.env.example
+dist/
+dist-app/
+client/dist/
+build-assets/
+# ── Files with secrets / local-only (NEVER commit) ──
+app details.txt
+app-details.txt
+.claude/
+server/run.err
+server/*.err
+
+.DS_Store
+*.log
