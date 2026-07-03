@@ -111,24 +111,41 @@ export async function runPipeline(articleId, override = {}) {
   }
 }
 
+// One fixed 5-minute heartbeat handles BOTH modes; settings are re-read live
+// each tick so changing them in the admin takes effect immediately (no restart).
+//   post_mode = 'schedule' → posts one article every `post_interval` hours
+//   post_mode = 'realtime' → posts new articles as soon as they're scraped
+//                            (matches the website's timing), up to the daily cap.
+// The daily cap is clamped to 25 — Instagram's API publishing limit per 24h.
 export async function startScheduler() {
-  const settings  = await getSettings();
-  const cronExpr  = hoursToCron(settings.post_interval);
   if (schedulerJob) schedulerJob.stop();
-  schedulerJob = cron.schedule(cronExpr, async () => {
+  schedulerJob = cron.schedule('*/5 * * * *', async () => {
     try {
-      const live = await getSettings();
-      if ((live.auto_post || 'off') !== 'on') return;
-      if (await dailyCapReached(live.max_posts_per_day)) return;
+      const s = await getSettings();
+      if ((s.auto_post || 'off') !== 'on') return;
+
+      const cap = Math.min(25, Math.max(1, parseInt(s.max_posts_per_day, 10) || 25));
+      if (await dailyCapReached(cap)) return;
+
+      // In schedule mode, throttle: wait `post_interval` hours since the last post.
+      if ((s.post_mode || 'schedule') === 'schedule') {
+        const intervalMs = Math.max(1, parseInt(s.post_interval, 10) || 1) * 3600 * 1000;
+        const { data: last } = await supabase
+          .from(T_ARTICLES).select('posted_at').eq('status', 'posted')
+          .order('posted_at', { ascending: false }).limit(1).maybeSingle();
+        if (last?.posted_at && (Date.now() - new Date(last.posted_at).getTime()) < intervalMs) return;
+      }
+      // realtime mode: no extra wait — post the next queued article now.
+
       const { data: next } = await supabase
         .from(T_ARTICLES).select('id,headline').eq('status', 'pending')
         .order('scraped_at', { ascending: true }).limit(1).maybeSingle();
       if (!next) return;
-      console.log(`[Scheduler] Posting: "${next.headline?.slice(0, 50)}"`);
+      console.log(`[Scheduler] (${s.post_mode || 'schedule'}) Posting: "${next.headline?.slice(0, 50)}"`);
       await runPipeline(next.id);
     } catch (e) { console.error('[Scheduler] tick error:', e.message); }
   });
-  console.log(`[Scheduler] Started (every ${settings.post_interval}h → "${cronExpr}").`);
+  console.log('[Scheduler] Started — 5-min heartbeat (mode/interval read live).');
   return schedulerJob;
 }
 

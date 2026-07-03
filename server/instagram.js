@@ -91,6 +91,27 @@ export async function postStoryToInstagram(imageUrl) {
   }
 }
 
+// Instagram caps API publishing at ~25 posts per rolling 24h (higher for some
+// accounts). This queries the ACTUAL live number + how many you've used.
+export async function getPublishingLimit() {
+  const token = process.env.PAGE_ACCESS_TOKEN;
+  if (!token) return { ok: false, error: 'PAGE_ACCESS_TOKEN not set', limit: 25, used: 0 };
+  try {
+    const res = await axios.get(`${root}/${ACCOUNT}/content_publishing_limit`, {
+      params: { fields: 'config,quota_usage', access_token: token },
+      timeout: 15000,
+    });
+    const d = res.data?.data?.[0] || {};
+    return {
+      ok: true,
+      used: Number(d.quota_usage ?? 0),
+      limit: Number(d.config?.quota_total ?? 25),
+    };
+  } catch (err) {
+    return { ok: false, error: graphErr(err), limit: 25, used: 0 };
+  }
+}
+
 export async function testConnection() {
   const token = process.env.PAGE_ACCESS_TOKEN;
   if (!token) return { ok: false, error: 'PAGE_ACCESS_TOKEN not set' };
@@ -115,4 +136,4 @@ function graphErr(err) {
   );
 }
 
-export default { postToInstagram, postStoryToInstagram, testConnection };
+export default { postToInstagram, postStoryToInstagram, testConnection, getPublishingLimit };

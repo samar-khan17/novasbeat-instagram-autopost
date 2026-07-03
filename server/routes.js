@@ -207,6 +207,12 @@ router.post('/test-instagram', async (_req, res) => {
   res.json(result);
 });
 
+// ── GET /api/ig-limit — real Instagram publishing quota (used / total) ──
+router.get('/ig-limit', async (_req, res) => {
+  const result = await instagram.getPublishingLimit();
+  res.json(result);
+});
+
 // ── POST /api/test-grok ─────────────────────────────────────────────
 router.post('/test-grok', async (_req, res) => {
   try {
