@@ -124,7 +124,7 @@ export async function startScheduler() {
       const s = await getSettings();
       if ((s.auto_post || 'off') !== 'on') return;
 
-      const cap = Math.min(25, Math.max(1, parseInt(s.max_posts_per_day, 10) || 25));
+      const cap = Math.min(100, Math.max(1, parseInt(s.max_posts_per_day, 10) || 25));
       if (await dailyCapReached(cap)) return;
 
       // In schedule mode, throttle: wait `post_interval` hours since the last post.
