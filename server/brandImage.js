@@ -57,13 +57,50 @@ function wrapText(text, maxChars, maxLines = 2) {
   return lines.slice(0, maxLines);
 }
 
-// Template default: 54px Poppins 800, scale down for very long lines
+// ── Real per-character width table for headline fitting ──────────────
+// Flat char-count × 0.60 ratios badly underestimate wide-letter-heavy
+// headlines (M/W/O/Q/G/D/H/U/N/B/R/K), whose rendered width then exceeds
+// AVAIL and gets silently clipped by the SVG's own canvas bounds. This
+// table (em-units, Arial Black bold uppercase reference) fixes that.
+const NARROW_CHARS = new Set('IJLil1.,:;\'|! '.split(''));
+const WIDE_CHARS    = new Set('MWOQGDHUNBRK%@'.split(''));
+function charWidthEm(ch) {
+  if (NARROW_CHARS.has(ch)) return 0.42;
+  if (WIDE_CHARS.has(ch))   return 0.82;
+  return 0.66; // medium — most letters/digits
+}
+function textWidthPx(text, fontSize) {
+  let em = 0;
+  for (const ch of String(text || '').toUpperCase()) em += charWidthEm(ch);
+  return em * fontSize;
+}
+
+// Iteratively find the largest font size (maxFs→minFs) at which BOTH
+// headline lines actually fit AVAIL width using real per-char measurement
+// (not a flat ratio) — guarantees no silent SVG-boundary clipping.
 function headlineFontSize(line1, line2, maxFs = 54, minFs = 26) {
-  const longest = Math.max(String(line1 || '').length, String(line2 || '').length);
-  if (!longest) return maxFs;
-  // Arial Black uppercase char width ratio ≈ 0.60
-  const needed = AVAIL / (longest * 0.60);
-  return Math.max(minFs, Math.min(maxFs, Math.floor(needed)));
+  const l1 = String(line1 || ''), l2 = String(line2 || '');
+  if (!l1 && !l2) return maxFs;
+  for (let fs = maxFs; fs >= minFs; fs--) {
+    if (textWidthPx(l1, fs) <= AVAIL && textWidthPx(l2, fs) <= AVAIL) return fs;
+  }
+  return minFs;
+}
+
+// If a headline line still doesn't fit AVAIL even at minFs (e.g. one very
+// long word-heavy line), split it into two so nothing ever renders past
+// the canvas edge. Returns an array of 1-2 lines.
+function fitOrSplitLine(line, fontSize) {
+  const text = String(line || '');
+  if (!text || textWidthPx(text, fontSize) <= AVAIL) return [text];
+  const words = text.split(/\s+/);
+  if (words.length < 2) return [text]; // single unsplittable word — let it be, rare
+  let best = 1;
+  for (let i = 1; i < words.length; i++) {
+    const head = words.slice(0, i).join(' ');
+    if (textWidthPx(head, fontSize) <= AVAIL) best = i; else break;
+  }
+  return [words.slice(0, best).join(' '), words.slice(best).join(' ')];
 }
 
 // ── Icon paths: 24×24 viewBox, filled white — EXACT from template ─
@@ -91,6 +128,15 @@ function buildSvg({ line1, line2, description, category, keyPoints }) {
   const HL_FS = headlineFontSize(line1, line2);
   const HL_LH = Math.round(HL_FS * 1.05);   // template: line-height:1.05
 
+  // Final display lines — split further if a line still doesn't fit AVAIL
+  // even at HL_FS (rare, e.g. one very long word-heavy line). Guarantees
+  // nothing ever renders past the canvas edge. line1 stays white,
+  // whatever comes from line2 keeps the gradient accent.
+  const hlLines = [
+    ...fitOrSplitLine(line1, HL_FS).map(t => ({ text: t, grad: false })),
+    ...fitOrSplitLine(line2, HL_FS).map(t => ({ text: t, grad: true })),
+  ].filter(l => l.text).slice(0, 4);
+
   // ── Description text (wrapped to 2 lines, 19px Inter) ─────────────
   const descLines = wrapText(String(description || ''), 68, 2);
   const DESC_FS  = 19;
@@ -108,11 +154,12 @@ function buildSvg({ line1, line2, description, category, keyPoints }) {
   // CONTENT area starts at hero bottom
   const CONT_Y = HERO_H;   // 560
 
-  // HEADLINE — padding-top: 24px (.content)
+  // HEADLINE — padding-top: 24px (.content). Height cascades from the
+  // ACTUAL line count (hlLines.length), not a hardcoded 2, so 1-line and
+  // 3-line headlines both push the rest of the layout down correctly.
   const HL_TOP  = CONT_Y + 24;                        // 584
-  const HL_Y1   = HL_TOP + Math.round(HL_FS * 0.82); // baseline line 1
-  const HL_Y2   = HL_Y1 + HL_LH;                     // baseline line 2
-  const HL_BOT  = HL_TOP + HL_LH * 2;                // bottom of 2-line block
+  const HL_BASE = Math.round(HL_FS * 0.82);
+  const HL_BOT  = HL_TOP + HL_LH * hlLines.length;    // bottom of headline block
 
   // DESCRIPTION — margin-top: 22px
   const DESC_TOP = HL_BOT + 22;
@@ -275,16 +322,12 @@ function buildSvg({ line1, line2, description, category, keyPoints }) {
       font-family="${FP}" font-size="14" font-weight="700" fill="white" letter-spacing="0.5">BREAKING NEWS</text>
 
 <!-- ══ HEADLINE (padding-top:24 from CONT_Y=560, Poppins 800 ${HL_FS}px) ══ -->
-<!-- Line 1: white -->
-<text x="${PAD_X}" y="${HL_Y1}"
-      font-family="${FP}" font-size="${HL_FS}" font-weight="800" fill="white"
+<!-- Real per-char width fitting guarantees every line fits within AVAIL —
+     nothing here can render past the canvas edge and get SVG-clipped. -->
+${hlLines.map((l, i) => `<text x="${PAD_X}" y="${HL_TOP + HL_BASE + i * HL_LH}"
+      font-family="${FP}" font-size="${HL_FS}" font-weight="800" fill="${l.grad ? 'url(#hl2Grad)' : 'white'}"
       letter-spacing="${(-HL_FS * 0.01).toFixed(1)}"
->${esc(String(line1 || '').toUpperCase())}</text>
-<!-- Line 2: gradient purple→blue (.accent) -->
-<text x="${PAD_X}" y="${HL_Y2}"
-      font-family="${FP}" font-size="${HL_FS}" font-weight="800" fill="url(#hl2Grad)"
-      letter-spacing="${(-HL_FS * 0.01).toFixed(1)}"
->${esc(String(line2 || '').toUpperCase())}</text>
+>${esc(l.text.toUpperCase())}</text>`).join('\n')}
 
 <!-- ══ DESCRIPTION (margin-top:22px, padding-left:18px, border-left:3px #8A5CF6) ══ -->
 <rect x="${PAD_X}" y="${DESC_TOP}" width="3"
