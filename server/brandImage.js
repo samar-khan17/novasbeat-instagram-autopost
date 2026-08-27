@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════
-// NewsPost Auto — NovasBeat Instagram post generator v3
-// Template reference: novasbeat-instagram-template_2.html (pixel-exact)
-// Output: 1080×1080 JPEG — Instagram square
+// NewsPost Auto — NovasBeat social post generator v4
+// Design system shared across Instagram (1080×1080) and Facebook
+// (1200×630) — same brand tokens, typography, safe-fitting logic.
 // Method: Sharp + SVG compositing — no browser required
 // ═══════════════════════════════════════════════════════════════════
 import axios from 'axios';
@@ -12,12 +12,22 @@ import { uploadBufferToSupabase } from './supabaseStorage.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// ── Canvas dimensions ─────────────────────────────────────────────
+// ── Canvas dimensions — Instagram (square, primary format) ────────
 const W      = 1080;
 const H      = 1080;
-const HERO_H = 560;          // template: .hero { height: 560px }
-const PAD_X  = 40;           // template: .content { padding: 24px 40px 0 40px }
+const HERO_H = 560;
+const PAD_X  = 40;
 const AVAIL  = W - PAD_X * 2;  // 1000px usable text width
+
+// ── Canvas dimensions — Facebook (landscape, link/photo post) ─────
+const FB_W      = 1200;
+const FB_H      = 630;
+const FB_HERO_W = 620;         // hero photo occupies left ~52%
+const FB_PAD    = 44;
+const FB_AVAIL  = FB_W - FB_HERO_W - FB_PAD * 2; // text column width
+
+// ── Shared minimums (safe-area validation) ─────────────────────────
+const MIN_FOOTER_H = 90;  // footer must always keep at least this much room
 
 // ── Font families (best system equivalents for Poppins / Inter) ───
 const FP = "'Arial Black','Segoe UI Black',Impact,sans-serif";
@@ -44,7 +54,7 @@ export function makeSummary(body, maxLen = 180) {
 }
 
 function wrapText(text, maxChars, maxLines = 2) {
-  const words = String(text || '').trim().split(/\s+/);
+  const words = String(text || '').trim().split(/\s+/).filter(Boolean);
   const lines = [];
   let line = '';
   for (const w of words) {
@@ -54,14 +64,19 @@ function wrapText(text, maxChars, maxLines = 2) {
     else line = cand;
   }
   if (line && lines.length < maxLines) lines.push(line);
+  const wordsUsed = lines.join(' ').split(/\s+/).filter(Boolean).length;
+  if (wordsUsed < words.length && lines.length) {
+    lines[lines.length - 1] = lines[lines.length - 1].replace(/[.,;:]+$/, '') + '…';
+  }
   return lines.slice(0, maxLines);
 }
 
 // ── Real per-character width table for headline fitting ──────────────
 // Flat char-count × 0.60 ratios badly underestimate wide-letter-heavy
 // headlines (M/W/O/Q/G/D/H/U/N/B/R/K), whose rendered width then exceeds
-// AVAIL and gets silently clipped by the SVG's own canvas bounds. This
-// table (em-units, Arial Black bold uppercase reference) fixes that.
+// the available width and gets silently clipped by the SVG's own canvas
+// bounds. This table (em-units, Arial Black bold uppercase reference)
+// fixes that — used by BOTH the Instagram and Facebook renderers.
 const NARROW_CHARS = new Set('IJLil1.,:;\'|! '.split(''));
 const WIDE_CHARS    = new Set('MWOQGDHUNBRK%@'.split(''));
 function charWidthEm(ch) {
@@ -76,35 +91,43 @@ function textWidthPx(text, fontSize) {
 }
 
 // Iteratively find the largest font size (maxFs→minFs) at which BOTH
-// headline lines actually fit AVAIL width using real per-char measurement
-// (not a flat ratio) — guarantees no silent SVG-boundary clipping.
-function headlineFontSize(line1, line2, maxFs = 54, minFs = 26) {
+// headline lines actually fit `avail` width using real per-char
+// measurement — guarantees no silent SVG-boundary clipping.
+function headlineFontSize(line1, line2, avail, maxFs = 54, minFs = 26) {
   const l1 = String(line1 || ''), l2 = String(line2 || '');
   if (!l1 && !l2) return maxFs;
   for (let fs = maxFs; fs >= minFs; fs--) {
-    if (textWidthPx(l1, fs) <= AVAIL && textWidthPx(l2, fs) <= AVAIL) return fs;
+    if (textWidthPx(l1, fs) <= avail && textWidthPx(l2, fs) <= avail) return fs;
   }
   return minFs;
 }
 
-// If a headline line still doesn't fit AVAIL even at minFs (e.g. one very
-// long word-heavy line), split it into two so nothing ever renders past
-// the canvas edge. Returns an array of 1-2 lines.
-function fitOrSplitLine(line, fontSize) {
+// If a headline line still doesn't fit `avail` even at minFs (e.g. one
+// very long word-heavy line), split it into two so nothing ever renders
+// past the canvas edge. Returns an array of 1-2 lines.
+function fitOrSplitLine(line, fontSize, avail) {
   const text = String(line || '');
-  if (!text || textWidthPx(text, fontSize) <= AVAIL) return [text];
+  if (!text || textWidthPx(text, fontSize) <= avail) return [text];
   const words = text.split(/\s+/);
   if (words.length < 2) return [text]; // single unsplittable word — let it be, rare
   let best = 1;
   for (let i = 1; i < words.length; i++) {
     const head = words.slice(0, i).join(' ');
-    if (textWidthPx(head, fontSize) <= AVAIL) best = i; else break;
+    if (textWidthPx(head, fontSize) <= avail) best = i; else break;
   }
   return [words.slice(0, best).join(' '), words.slice(best).join(' ')];
 }
 
-// ── Icon paths: 24×24 viewBox, filled white — EXACT from template ─
-// Template: .icon-box svg { width:22px; height:22px; fill:var(--white); }
+function buildHeadlineLines(line1, line2, avail, maxFs = 54, minFs = 26) {
+  const fs = headlineFontSize(line1, line2, avail, maxFs, minFs);
+  const lines = [
+    ...fitOrSplitLine(line1, fs, avail).map(t => ({ text: t, grad: false })),
+    ...fitOrSplitLine(line2, fs, avail).map(t => ({ text: t, grad: true })),
+  ].filter(l => l.text).slice(0, 4);
+  return { fs, lines };
+}
+
+// ── Icon paths: 24×24 viewBox, filled white ────────────────────────
 const ICON_PATHS = {
   law:    'M12 2L4 7v2h16V7l-8-5zM4 21h16v-2H4v2zm2-9h2v6H6v-6zm4 0h2v6h-2v-6zm4 0h2v6h-2v-6zm4 0h2v6h-2v-6z',
   shield: 'M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z',
@@ -121,100 +144,131 @@ function getIconPath(type) {
   return ICON_PATHS[String(type || 'star').toLowerCase()] || ICON_PATHS.star;
 }
 
-// ── Build SVG overlay ─────────────────────────────────────────────
-function buildSvg({ line1, line2, description, category, keyPoints }) {
+// ── Shared gradient/def block (identical brand tokens on both formats) ─
+function defsBlock(padX, w) {
+  return `
+  <linearGradient id="purpGrad" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0%" stop-color="#8A5CF6"/>
+    <stop offset="100%" stop-color="#A855F7"/>
+  </linearGradient>
+  <linearGradient id="hl2Grad" x1="${padX}" y1="0" x2="${w - padX}" y2="0" gradientUnits="userSpaceOnUse">
+    <stop offset="0%"   stop-color="#8A5CF6"/>
+    <stop offset="100%" stop-color="#60A5FA"/>
+  </linearGradient>
+  <linearGradient id="ftGrad" x1="0" y1="0" x2="1" y2="0">
+    <stop offset="0%"   stop-color="#6d3fd1"/>
+    <stop offset="45%"  stop-color="#8A5CF6"/>
+    <stop offset="100%" stop-color="#A855F7"/>
+  </linearGradient>`;
+}
 
-  // ── Headline font size (template: 54px, scale down for long text) ─
-  const HL_FS = headlineFontSize(line1, line2);
-  const HL_LH = Math.round(HL_FS * 1.05);   // template: line-height:1.05
+// ── Debug overlay (canvas boundary + safe area) — dev only, never
+// included unless opts.debug === true. Renders on top of everything. ──
+function debugOverlay(w, h, padX, safeTop, safeBot) {
+  return `
+  <rect x="0.5" y="0.5" width="${w - 1}" height="${h - 1}" fill="none" stroke="#FF00FF" stroke-width="2"/>
+  <rect x="${padX}" y="${safeTop}" width="${w - padX * 2}" height="${safeBot - safeTop}"
+        fill="none" stroke="#00FF00" stroke-width="2" stroke-dasharray="8,6"/>
+  <text x="8" y="18" font-family="monospace" font-size="12" fill="#FF00FF">DEBUG: canvas ${w}×${h}</text>
+  <text x="${padX}" y="${safeTop - 6}" font-family="monospace" font-size="12" fill="#00FF00">safe area</text>`;
+}
 
-  // Final display lines — split further if a line still doesn't fit AVAIL
-  // even at HL_FS (rare, e.g. one very long word-heavy line). Guarantees
-  // nothing ever renders past the canvas edge. line1 stays white,
-  // whatever comes from line2 keeps the gradient accent.
-  const hlLines = [
-    ...fitOrSplitLine(line1, HL_FS).map(t => ({ text: t, grad: false })),
-    ...fitOrSplitLine(line2, HL_FS).map(t => ({ text: t, grad: true })),
-  ].filter(l => l.text).slice(0, 4);
+// ═══════════════════════════════════════════════════════════════════
+// INSTAGRAM (1080×1080) — standard + breaking layouts
+// ═══════════════════════════════════════════════════════════════════
+function buildSvg({ line1, line2, description, category, keyPoints, isBreaking = false, debug = false }) {
+  const { fs: HL_FS, lines: hlLines } = buildHeadlineLines(line1, line2, AVAIL, isBreaking ? 60 : 54, isBreaking ? 32 : 26);
+  const HL_LH = Math.round(HL_FS * 1.05);
 
-  // ── Description text (wrapped to 2 lines, 19px Inter) ─────────────
   const descLines = wrapText(String(description || ''), 68, 2);
   const DESC_FS  = 19;
-  const DESC_LH  = Math.round(DESC_FS * 1.5);   // template: line-height:1.5 → 29px
+  const DESC_LH  = Math.round(DESC_FS * 1.5);
 
-  // ── Key points (3 icon cards) ──────────────────────────────────────
   const KP = Array.isArray(keyPoints) && keyPoints.length >= 3 ? keyPoints.slice(0, 3) : [
     { title: 'Breaking Update', desc: 'Major development unfolding',    icon: 'fire'   },
     { title: 'Global Impact',   desc: 'Worldwide attention & reaction', icon: 'globe'  },
     { title: 'Analysis',        desc: 'In-depth coverage & context',   icon: 'people' },
   ];
 
-  // ── Y positions cascade exactly from HERO_H = 560 ─────────────────
-
-  // CONTENT area starts at hero bottom
-  const CONT_Y = HERO_H;   // 560
-
-  // HEADLINE — padding-top: 24px (.content). Height cascades from the
-  // ACTUAL line count (hlLines.length), not a hardcoded 2, so 1-line and
-  // 3-line headlines both push the rest of the layout down correctly.
-  const HL_TOP  = CONT_Y + 24;                        // 584
+  const CONT_Y = HERO_H;
+  let HL_TOP = CONT_Y + 24;
   const HL_BASE = Math.round(HL_FS * 0.82);
-  const HL_BOT  = HL_TOP + HL_LH * hlLines.length;    // bottom of headline block
+  let HL_BOT = HL_TOP + HL_LH * hlLines.length;
 
-  // DESCRIPTION — margin-top: 22px
-  const DESC_TOP = HL_BOT + 22;
-  const DESC_Y1  = DESC_TOP + Math.round(DESC_FS * 0.82);
-  const DESC_BOT = DESC_TOP + DESC_LH * Math.max(1, descLines.length);
+  // ── Automatic layout validation ─────────────────────────────────
+  // Breaking-news posts skip the icon cards (phase-13 dedicated
+  // treatment — headline dominant, less clutter) but keep ONE short
+  // supporting line, not zero — an empty content area just dumps all
+  // the leftover space into a giant blank footer, which looks broken
+  // in the other direction. Standard posts try description+cards, but
+  // if the resulting footer would be squeezed below MIN_FOOTER_H, drop
+  // cards first, then trim description to 1 line — footer never
+  // collapses or overflows either way.
+  let showCards = !isBreaking;
+  let descLinesUsed = isBreaking ? wrapText(String(description || ''), 72, 1) : descLines;
 
-  // ICON ROW — margin-top: 26px
-  // Card height: padding-top(16) + icon-box(44) + padding-bottom(16) = 76px
-  const ICO_TOP = DESC_BOT + 26;
-  const ICO_H   = 76;
-  const ICO_GAP = 18;   // template: .icon-row { gap: 18px }
-  const ICO_W   = Math.floor((AVAIL - ICO_GAP * 2) / 3);  // 3 cards, 2 gaps
-  const ICO_XS  = [PAD_X, PAD_X + ICO_W + ICO_GAP, PAD_X + (ICO_W + ICO_GAP) * 2];
-  const ICO_BOT = ICO_TOP + ICO_H;
+  function cascade(withCards, descCount) {
+    const DESC_TOP = HL_BOT + 22;
+    const DESC_BOT = descCount ? DESC_TOP + DESC_LH * descCount : HL_BOT;
+    const ICO_TOP = DESC_BOT + (withCards ? 26 : 0);
+    const ICO_H   = withCards ? 76 : 0;
+    const ICO_BOT = ICO_TOP + ICO_H;
+    const META_Y   = ICO_BOT + (withCards ? 22 : 30);
+    const META_TOP = META_Y + 18;
+    const BTN_H  = 41;
+    const META_BOT = META_TOP + BTN_H;
+    const FT_Y  = META_BOT + 20;
+    return { DESC_TOP, DESC_BOT, ICO_TOP, ICO_H, ICO_BOT, META_Y, META_TOP, BTN_H, META_BOT, FT_Y };
+  }
 
-  // META BAR — margin-top: 22px, padding-top: 18px
-  const META_Y   = ICO_BOT + 22;  // border-top line
-  const META_TOP = META_Y + 18;   // content starts here
+  let C = cascade(showCards, descLinesUsed.length);
+  if (H - C.FT_Y < MIN_FOOTER_H && showCards) {
+    showCards = false;
+    C = cascade(showCards, descLinesUsed.length);
+  }
+  if (H - C.FT_Y < MIN_FOOTER_H && descLinesUsed.length > 1) {
+    descLinesUsed = descLinesUsed.slice(0, 1);
+    C = cascade(showCards, descLinesUsed.length);
+  }
+  // If content is short (typically the breaking layout with no cards),
+  // the footer would otherwise stretch into a large empty purple block.
+  // Cap it and push the reclaimed space back up as breathing room above
+  // the headline instead — reads as an intentional, centered composition.
+  const MAX_FOOTER_H = 130;
+  const excess = (H - C.FT_Y) - MAX_FOOTER_H;
+  if (excess > 0) {
+    HL_TOP += excess;
+    HL_BOT += excess;
+    C = cascade(showCards, descLinesUsed.length);
+  }
+  const { DESC_TOP, DESC_BOT, ICO_TOP, ICO_H, ICO_BOT, META_Y, META_TOP, BTN_H, META_BOT, FT_Y } = C;
+  const DESC_Y1 = DESC_TOP + Math.round(DESC_FS * 0.82);
+  const FT_H = H - FT_Y;
+  const FT_CY = FT_Y + FT_H / 2;
 
-  // Read-more button: padding 13px 26px, font 14.5px → height 41px
-  const BTN_H  = 41;
-  const BTN_W  = 396;   // wide enough for "For more news, visit novasbeat.com" + arrow
+  const BTN_W  = 396;
   const BTN_X  = W - PAD_X - BTN_W;
   const BTN_Y  = META_TOP;
   const BTN_CY = BTN_Y + BTN_H / 2;
-  const META_BOT = META_TOP + BTN_H;
 
-  // FOOTER — margin-top: 20px, takes remaining space
-  const FT_Y  = META_BOT + 20;
-  const FT_H  = H - FT_Y;
-  const FT_CY = FT_Y + FT_H / 2;
-
-  // ── Category tag ──────────────────────────────────────────────────
-  // template: padding:10px 22px, radius:9px, Poppins 700 16px
   const cat  = esc(String(category || 'News').toUpperCase());
-  // Approx Poppins 700 16px char width ~10px, padding 22px each side
   const catW = Math.max(90, cat.length * 10 + 44);
-  const catH = 36;   // 10 + 16 + 10
+  const catH = 36;
 
-  // ── Icon cards ────────────────────────────────────────────────────
-  // template: icon-card padding:16px 18px, gap:14px; icon-box 44×44 r10
+  const ICO_GAP = 18;
+  const ICO_W   = Math.floor((AVAIL - ICO_GAP * 2) / 3);
+  const ICO_XS  = [PAD_X, PAD_X + ICO_W + ICO_GAP, PAD_X + (ICO_W + ICO_GAP) * 2];
   const ICON_BOX = 44;
-  const ICON_SC  = (22 / 24).toFixed(4);   // 22×22 icon in 24×24 viewBox
-  const ICON_OFF = (ICON_BOX - 22) / 2;    // 11px — centers icon in box
+  const ICON_SC  = (22 / 24).toFixed(4);
+  const ICON_OFF = (ICON_BOX - 22) / 2;
+  const labY = ICO_TOP + 16 + Math.round(14 * 0.82);
+  const subY = labY + 14 + 3 + Math.round(13 * 0.82);
 
-  // Icon text positions (same Y for all cards — all share ICO_TOP)
-  const labY = ICO_TOP + 16 + Math.round(14 * 0.82);   // Poppins 700 14px baseline
-  const subY = labY + 14 + 3 + Math.round(13 * 0.82);  // Inter 400 13px, margin-top:3px
-
-  const cardsSvg = ICO_XS.map((cx, i) => {
+  const cardsSvg = !showCards ? '' : ICO_XS.map((cx, i) => {
     const kp   = KP[i];
-    const boxX = cx + 18;           // card padding-left: 18px
-    const boxY = ICO_TOP + 16;      // card padding-top: 16px
-    const txtX = boxX + ICON_BOX + 14;  // gap: 14px between icon box and text
-
+    const boxX = cx + 18;
+    const boxY = ICO_TOP + 16;
+    const txtX = boxX + ICON_BOX + 14;
     return `
   <rect x="${cx}" y="${ICO_TOP}" width="${ICO_W}" height="${ICO_H}" rx="14"
         fill="rgba(138,92,246,0.08)" stroke="rgba(138,92,246,0.25)" stroke-width="1"/>
@@ -228,43 +282,17 @@ function buildSvg({ line1, line2, description, category, keyPoints }) {
   >${esc(String(kp.desc || '').slice(0, 38))}</text>`;
   }).join('');
 
-  // ── SVG output ────────────────────────────────────────────────────
   return Buffer.from(`<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
-<defs>
-  <!-- Purple 135° gradient — brand buttons, marks, icon boxes -->
-  <linearGradient id="purpGrad" x1="0" y1="0" x2="1" y2="1">
-    <stop offset="0%" stop-color="#8A5CF6"/>
-    <stop offset="100%" stop-color="#A855F7"/>
-  </linearGradient>
-
-  <!-- Headline line-2 gradient: purple → blue (left to right) -->
-  <linearGradient id="hl2Grad" x1="${PAD_X}" y1="0" x2="${W - PAD_X}" y2="0" gradientUnits="userSpaceOnUse">
-    <stop offset="0%"   stop-color="#8A5CF6"/>
-    <stop offset="100%" stop-color="#60A5FA"/>
-  </linearGradient>
-
-  <!-- Footer gradient: 90° -->
-  <linearGradient id="ftGrad" x1="0" y1="0" x2="1" y2="0">
-    <stop offset="0%"   stop-color="#6d3fd1"/>
-    <stop offset="45%"  stop-color="#8A5CF6"/>
-    <stop offset="100%" stop-color="#A855F7"/>
-  </linearGradient>
-
-  <!-- Hero gradient overlay — matches template exactly:
-       linear-gradient(180deg, rgba(36,29,68,0.1) 0%, rgba(20,16,38,0.55) 55%, #0B0B0F 100%) -->
+<defs>${defsBlock(PAD_X, W)}
   <linearGradient id="heroOverlay" x1="0" y1="0" x2="0" y2="1">
     <stop offset="0%"   stop-color="#241d44" stop-opacity="0.10"/>
     <stop offset="55%"  stop-color="#141026" stop-opacity="0.55"/>
     <stop offset="100%" stop-color="#0B0B0F" stop-opacity="1"/>
   </linearGradient>
-
-  <!-- Hero vignette: radial-gradient(ellipse at 50% 30%, transparent 40%, rgba(11,11,15,0.5) 100%) -->
   <radialGradient id="heroVignette" cx="50%" cy="30%" r="70%" gradientUnits="objectBoundingBox">
     <stop offset="40%"  stop-color="#0B0B0F" stop-opacity="0"/>
     <stop offset="100%" stop-color="#0B0B0F" stop-opacity="0.5"/>
   </radialGradient>
-
-  <!-- Hero glow: purple left, blue right -->
   <radialGradient id="heroGlowL" cx="20%" cy="0%" r="55%" gradientUnits="objectBoundingBox">
     <stop offset="0%"   stop-color="#8A5CF6" stop-opacity="0.55"/>
     <stop offset="100%" stop-color="#8A5CF6" stop-opacity="0"/>
@@ -273,182 +301,202 @@ function buildSvg({ line1, line2, description, category, keyPoints }) {
     <stop offset="0%"   stop-color="#60A5FA" stop-opacity="0.45"/>
     <stop offset="100%" stop-color="#60A5FA" stop-opacity="0"/>
   </radialGradient>
-
-  <!-- Hero grid — 40×40, 4% opacity lines -->
   <pattern id="heroGrid" width="40" height="40" patternUnits="userSpaceOnUse">
     <line x1="0" y1="0" x2="40" y2="0" stroke="white" stroke-width="0.5" stroke-opacity="0.04"/>
     <line x1="0" y1="0" x2="0" y2="40" stroke="white" stroke-width="0.5" stroke-opacity="0.04"/>
   </pattern>
 </defs>
 
-<!-- ══ CONTENT BACKGROUND (below hero) ══════════════════════════ -->
 <rect x="0" y="${CONT_Y}" width="${W}" height="${H - CONT_Y}" fill="#0B0B0F"/>
 
-<!-- ══ HERO OVERLAYS — painted over the article photo (below SVG) -->
-<!-- glow accents first, then grid, vignette, finally gradient overlay -->
 <rect x="0" y="0" width="${W}" height="${HERO_H}" fill="url(#heroGlowL)"/>
 <rect x="0" y="0" width="${W}" height="${HERO_H}" fill="url(#heroGlowR)"/>
 <rect x="0" y="0" width="${W}" height="${HERO_H}" fill="url(#heroGrid)" opacity="0.5"/>
 <rect x="0" y="0" width="${W}" height="${HERO_H}" fill="url(#heroVignette)"/>
 <rect x="0" y="0" width="${W}" height="${HERO_H}" fill="url(#heroOverlay)"/>
 
-<!-- ══ TOP BAR (absolute: top:36 left:36 right:36) ══════════════ -->
-
-<!-- Brand mark: 52×52, radius:14, purple gradient, glow shadow -->
-<!-- box-shadow:0 0 24px rgba(138,92,246,0.6) approximated by layering -->
 <rect x="30" y="30" width="64" height="64" rx="18" fill="rgba(138,92,246,0.3)"/>
 <rect x="36" y="36" width="52" height="52" rx="14" fill="url(#purpGrad)"/>
-<text x="62" y="71"
-      font-family="${FP}" font-size="24" font-weight="800" fill="white" text-anchor="middle">N</text>
+<text x="62" y="71" font-family="${FP}" font-size="24" font-weight="800" fill="white" text-anchor="middle">N</text>
+<text x="102" y="60" font-family="${FP}" font-size="21" font-weight="700" fill="white">Novas Beat</text>
+<text x="102" y="79" font-family="${FI}" font-size="12" font-style="italic" fill="#38E0D2">The world, unfiltered.</text>
 
-<!-- Brand text: name (Poppins 700 21px) + tagline (Inter italic 12px teal) -->
-<text x="102" y="60"
-      font-family="${FP}" font-size="21" font-weight="700" fill="white">Novas Beat</text>
-<text x="102" y="79"
-      font-family="${FI}" font-size="12" font-style="italic" fill="#38E0D2">The world, unfiltered.</text>
-
-<!-- Category tag: below brand col, gap:14px → top at 36+52+14=102 -->
-<!-- padding:10px 22px, radius:9px, Poppins 700 16px -->
 <rect x="36" y="102" width="${catW}" height="${catH}" rx="9" fill="url(#purpGrad)"/>
-<text x="${36 + catW / 2}" y="125"
-      font-family="${FP}" font-size="16" font-weight="700" fill="white"
+<text x="${36 + catW / 2}" y="125" font-family="${FP}" font-size="16" font-weight="700" fill="white"
       text-anchor="middle" letter-spacing="0.6">${cat}</text>
 
-<!-- Breaking News badge: right side, padding:10px 20px radius:999px Poppins 700 14px -->
-<!-- Width: "● Breaking News" ≈ 175px -->
-<rect x="${W - 36 - 175}" y="36" width="175" height="34" rx="17" fill="url(#purpGrad)"/>
+${isBreaking ? `<rect x="${W - 36 - 175}" y="36" width="175" height="34" rx="17" fill="url(#purpGrad)"/>
 <circle cx="${W - 36 - 175 + 18}" cy="53" r="4" fill="white"/>
-<text x="${W - 36 - 175 + 30}" y="57"
-      font-family="${FP}" font-size="14" font-weight="700" fill="white" letter-spacing="0.5">BREAKING NEWS</text>
+<text x="${W - 36 - 175 + 30}" y="57" font-family="${FP}" font-size="14" font-weight="700" fill="white"
+      letter-spacing="0.5">BREAKING NEWS</text>` : ''}
 
-<!-- ══ HEADLINE (padding-top:24 from CONT_Y=560, Poppins 800 ${HL_FS}px) ══ -->
-<!-- Real per-char width fitting guarantees every line fits within AVAIL —
-     nothing here can render past the canvas edge and get SVG-clipped. -->
 ${hlLines.map((l, i) => `<text x="${PAD_X}" y="${HL_TOP + HL_BASE + i * HL_LH}"
       font-family="${FP}" font-size="${HL_FS}" font-weight="800" fill="${l.grad ? 'url(#hl2Grad)' : 'white'}"
       letter-spacing="${(-HL_FS * 0.01).toFixed(1)}"
 >${esc(l.text.toUpperCase())}</text>`).join('\n')}
 
-<!-- ══ DESCRIPTION (margin-top:22px, padding-left:18px, border-left:3px #8A5CF6) ══ -->
-<rect x="${PAD_X}" y="${DESC_TOP}" width="3"
-      height="${DESC_LH * Math.max(1, descLines.length) + 4}" rx="1.5" fill="#8A5CF6"/>
-${descLines.map((dl, i) =>
+${descLinesUsed.length ? `<rect x="${PAD_X}" y="${DESC_TOP}" width="3"
+      height="${DESC_LH * descLinesUsed.length + 4}" rx="1.5" fill="#8A5CF6"/>
+${descLinesUsed.map((dl, i) =>
   `<text x="${PAD_X + 18}" y="${DESC_Y1 + i * DESC_LH}"
       font-family="${FI}" font-size="${DESC_FS}" fill="#D8D6E3">${esc(dl)}</text>`
-).join('\n')}
+).join('\n')}` : ''}
 
-<!-- ══ ICON CARDS (margin-top:26px, gap:18px, 3 cards) ══════════ -->
 ${cardsSvg}
 
-<!-- ══ META BAR (margin-top:22px, padding-top:18px, border-top) ══ -->
-<line x1="${PAD_X}" y1="${META_Y}" x2="${W - PAD_X}" y2="${META_Y}"
-      stroke="rgba(255,255,255,0.1)" stroke-width="1"/>
-
-<!-- meta-left: source text (Inter 14px #C9C6D8) -->
-<text x="${PAD_X}" y="${BTN_CY + 5}"
-      font-family="${FI}" font-size="14" fill="#C9C6D8"
+<line x1="${PAD_X}" y1="${META_Y}" x2="${W - PAD_X}" y2="${META_Y}" stroke="rgba(255,255,255,0.1)" stroke-width="1"/>
+<text x="${PAD_X}" y="${BTN_CY + 5}" font-family="${FI}" font-size="14" fill="#C9C6D8"
 >Source: <tspan font-weight="600" fill="white">Novas Beat News Desk</tspan></text>
 
-<!-- read-more pill button: padding 13px 26px, Poppins 600 14.5px -->
 <rect x="${BTN_X}" y="${BTN_Y}" width="${BTN_W}" height="${BTN_H}" rx="${BTN_H / 2}" fill="url(#purpGrad)"/>
-<text x="${BTN_X + BTN_W / 2 - 14}" y="${BTN_CY + 5}"
-      font-family="${FP}" font-size="14.5" font-weight="600" fill="white"
+<text x="${BTN_X + BTN_W / 2 - 14}" y="${BTN_CY + 5}" font-family="${FP}" font-size="14.5" font-weight="600" fill="white"
       text-anchor="middle">For more news, visit novasbeat.com</text>
 <g transform="translate(${BTN_X + BTN_W - 30},${BTN_CY - 8}) scale(${(16 / 24).toFixed(4)})">
   <path d="${ARROW_PATH}" fill="white"/>
 </g>
 
-<!-- ══ FOOTER (margin-top:20px, gradient 90°, padding:22px 40px) ══ -->
 <rect x="0" y="${FT_Y}" width="${W}" height="${FT_H}" fill="url(#ftGrad)"/>
-
-<!-- footer-logo-mark: 42×42, radius:12, rgba(255,255,255,0.16) border -->
 <rect x="${PAD_X}" y="${FT_CY - 21}" width="42" height="42" rx="12"
       fill="rgba(255,255,255,0.16)" stroke="rgba(255,255,255,0.3)" stroke-width="1"/>
-<text x="${PAD_X + 21}" y="${FT_CY + 7}"
-      font-family="${FP}" font-size="19" font-weight="800" fill="white" text-anchor="middle">N</text>
-
-<!-- footer text: site Poppins 700 17px + label Inter 400 12.5px -->
-<text x="${PAD_X + 54}" y="${FT_CY - 2}"
-      font-family="${FP}" font-size="17" font-weight="700" fill="white">novasbeat.com</text>
-<text x="${PAD_X + 54}" y="${FT_CY + 17}"
-      font-family="${FI}" font-size="12.5" fill="rgba(255,255,255,0.8)"
+<text x="${PAD_X + 21}" y="${FT_CY + 7}" font-family="${FP}" font-size="19" font-weight="800" fill="white" text-anchor="middle">N</text>
+<text x="${PAD_X + 54}" y="${FT_CY - 2}" font-family="${FP}" font-size="17" font-weight="700" fill="white">novasbeat.com</text>
+<text x="${PAD_X + 54}" y="${FT_CY + 17}" font-family="${FI}" font-size="12.5" fill="rgba(255,255,255,0.8)"
 >AI-powered · Verified across hundreds of sources</text>
 
+${debug ? debugOverlay(W, H, PAD_X, HL_TOP - 24, FT_Y) : ''}
 </svg>`);
 }
 
-// ── Public API ─────────────────────────────────────────────────────
-// headline: string OR { line1, line2 } (from grok.generateShortHeadline)
-export async function buildBrandedImage(imageUrl, headline, category, opts = {}) {
-  const { body = '', summary, keyPoints } = opts;
+// ═══════════════════════════════════════════════════════════════════
+// FACEBOOK (1200×630) — same brand tokens, landscape split composition
+// ═══════════════════════════════════════════════════════════════════
+function buildFbSvg({ line1, line2, description, category, isBreaking = false, debug = false }) {
+  const textX = FB_HERO_W + FB_PAD;
+  const { fs: HL_FS, lines: hlLines } = buildHeadlineLines(line1, line2, FB_AVAIL, 40, 22);
+  const HL_LH = Math.round(HL_FS * 1.08);
 
-  // Resolve headline into two display lines
-  let line1, line2;
-  if (headline && typeof headline === 'object' && headline.line1) {
-    line1 = String(headline.line1).trim();
-    line2 = String(headline.line2 || '').trim();
-  } else {
-    const words = String(headline || '').trim().split(/\s+/);
-    const mid   = Math.ceil(words.length / 2);
-    line1 = words.slice(0, mid).join(' ');
-    line2 = words.slice(mid).join(' ');
-  }
+  const descLines = wrapText(String(description || ''), 42, 3);
+  const DESC_FS = 16, DESC_LH = Math.round(DESC_FS * 1.5);
 
-  const description = summary || makeSummary(body, 160);
+  const cat  = esc(String(category || 'News').toUpperCase());
+  const catW = Math.max(80, cat.length * 8 + 36);
 
-  // 1. Download article photo — hero slot, 1080×560 cover crop
-  let photo = null;
+  const FT_Y = FB_H - 56;
+  const BRAND_H = 34 + 20; // brand row + gap, fixed at top
+  const contentH = HL_LH * hlLines.length + 18 + DESC_LH * Math.max(1, descLines.length);
+  // Vertically center the headline+description block in the space between
+  // the brand row and the footer, instead of anchoring it to the top and
+  // leaving a large dead gap above the footer.
+  const TOP = 40;
+  const blockTop = TOP + BRAND_H + Math.max(0, Math.round((FT_Y - 24 - (TOP + BRAND_H) - contentH) / 2));
+  const HL_TOP = blockTop;
+  const HL_BASE = Math.round(HL_FS * 0.82);
+  const HL_BOT = HL_TOP + HL_LH * hlLines.length;
+  const DESC_TOP = HL_BOT + 18;
+  const DESC_Y1 = DESC_TOP + Math.round(DESC_FS * 0.82);
+
+  return Buffer.from(`<svg width="${FB_W}" height="${FB_H}" xmlns="http://www.w3.org/2000/svg">
+<defs>${defsBlock(FB_PAD, FB_W)}</defs>
+
+<!-- Only the text column gets a background fill — the hero photo (left
+     ${FB_HERO_W}px, composited below this SVG layer) must stay visible. -->
+<rect x="${FB_HERO_W}" y="0" width="${FB_W - FB_HERO_W}" height="${FB_H}" fill="#0B0B0F"/>
+<rect x="${textX}" y="${TOP}" width="26" height="26" rx="7" fill="url(#purpGrad)"/>
+<text x="${textX + 13}" y="${TOP + 19}" font-family="${FP}" font-size="13" font-weight="800" fill="white" text-anchor="middle">N</text>
+<text x="${textX + 36}" y="${TOP + 19}" font-family="${FP}" font-size="15" font-weight="700" fill="white">Novas Beat</text>
+
+<rect x="${textX}" y="${TOP + 34}" width="${catW}" height="26" rx="7" fill="url(#purpGrad)"/>
+<text x="${textX + catW / 2}" y="${TOP + 51}" font-family="${FP}" font-size="12" font-weight="700" fill="white"
+      text-anchor="middle" letter-spacing="0.5">${cat}</text>
+${isBreaking ? `<rect x="${textX + catW + 10}" y="${TOP + 34}" width="120" height="26" rx="13" fill="url(#purpGrad)"/>
+<circle cx="${textX + catW + 26}" cy="${TOP + 47}" r="3" fill="white"/>
+<text x="${textX + catW + 36}" y="${TOP + 51}" font-family="${FP}" font-size="11" font-weight="700" fill="white">BREAKING</text>` : ''}
+
+${hlLines.map((l, i) => `<text x="${textX}" y="${HL_TOP + HL_BASE + i * HL_LH}"
+      font-family="${FP}" font-size="${HL_FS}" font-weight="800" fill="${l.grad ? 'url(#hl2Grad)' : 'white'}"
+      letter-spacing="${(-HL_FS * 0.01).toFixed(1)}"
+>${esc(l.text.toUpperCase())}</text>`).join('\n')}
+
+${descLines.map((dl, i) => `<text x="${textX}" y="${DESC_Y1 + i * DESC_LH}"
+      font-family="${FI}" font-size="${DESC_FS}" fill="#D8D6E3">${esc(dl)}</text>`).join('\n')}
+
+<rect x="${textX}" y="${FT_Y}" width="${FB_W - textX - FB_PAD}" height="1" fill="rgba(255,255,255,0.15)"/>
+<text x="${textX}" y="${FT_Y + 30}" font-family="${FP}" font-size="15" font-weight="700" fill="white">novasbeat.com</text>
+<text x="${textX}" y="${FT_Y + 48}" font-family="${FI}" font-size="11.5" fill="rgba(255,255,255,0.7)"
+>AI-powered · Verified across hundreds of sources</text>
+
+${debug ? debugOverlay(FB_W, FB_H, FB_PAD, TOP, FT_Y) : ''}
+</svg>`);
+}
+
+// ── Shared photo download + hero fit ───────────────────────────────
+async function downloadHero(imageUrl, w, h, fallbackColor) {
   if (imageUrl) {
-    console.log('[brandImage] Downloading photo:', imageUrl);
     try {
       const dl = await axios.get(imageUrl, {
-        responseType: 'arraybuffer',
-        timeout: 25000,
+        responseType: 'arraybuffer', timeout: 25000,
         headers: { 'User-Agent': 'Mozilla/5.0 (compatible; NewsPostAuto/1.0)' },
       });
-      photo = await sharp(Buffer.from(dl.data))
-        .resize(W, HERO_H, { fit: 'cover', position: 'attention' })
-        .jpeg({ quality: 90 })
-        .toBuffer();
-      console.log('[brandImage] Photo OK —', photo.length, 'bytes');
+      return await sharp(Buffer.from(dl.data)).resize(w, h, { fit: 'cover', position: 'attention' })
+        .jpeg({ quality: 90 }).toBuffer();
     } catch (e) {
       console.warn('[brandImage] Photo download FAILED:', e.message, '→ using gradient hero');
     }
-  } else {
-    console.log('[brandImage] No imageUrl — using gradient hero');
   }
+  return sharp({ create: { width: w, height: h, channels: 3, background: fallbackColor } })
+    .jpeg({ quality: 80 }).toBuffer();
+}
 
-  // 2. Dark 1080×1080 base canvas
-  const bg = await sharp({
-    create: { width: W, height: H, channels: 3, background: { r: 11, g: 11, b: 15 } },
-  }).png().toBuffer();
-
-  // 3. SVG overlay (everything except the article photo)
-  const svgBuf = buildSvg({ line1, line2, description, category, keyPoints });
-
-  // 4. Composite: base → article photo → SVG overlay
-  const layers = [];
-
-  if (photo) {
-    // Photo fills the hero area (top 560px); SVG overlays go on top
-    layers.push({ input: photo, top: 0, left: 0 });
-  } else {
-    // Fallback: gradient hero in the brand purple-dark range
-    const heroBg = await sharp({
-      create: { width: W, height: HERO_H, channels: 3, background: { r: 68, g: 58, b: 122 } },
-    }).jpeg({ quality: 80 }).toBuffer();
-    layers.push({ input: heroBg, top: 0, left: 0 });
+function resolveHeadlineLines(headline) {
+  if (headline && typeof headline === 'object' && headline.line1) {
+    return { line1: String(headline.line1).trim(), line2: String(headline.line2 || '').trim() };
   }
+  const words = String(headline || '').trim().split(/\s+/);
+  const mid = Math.ceil(words.length / 2);
+  return { line1: words.slice(0, mid).join(' '), line2: words.slice(mid).join(' ') };
+}
 
-  layers.push({ input: svgBuf, top: 0, left: 0 });
+// ── Public API — Instagram (1080×1080, primary format) ─────────────
+// headline: string OR { line1, line2 }. opts.isBreaking selects the
+// dedicated Breaking News treatment. opts.debug overlays safe-area
+// guides (never use in production output).
+export async function buildBrandedImage(imageUrl, headline, category, opts = {}) {
+  const { body = '', summary, keyPoints, isBreaking = false, debug = false } = opts;
+  const { line1, line2 } = resolveHeadlineLines(headline);
+  const description = summary || makeSummary(body, 160);
 
-  // 5. Final output — 1080×1080 JPEG (no extra resize needed; base already correct size)
+  const photo = await downloadHero(imageUrl, W, HERO_H, { r: 68, g: 58, b: 122 });
+  const bg = await sharp({ create: { width: W, height: H, channels: 3, background: { r: 11, g: 11, b: 15 } } })
+    .png().toBuffer();
+  const svgBuf = buildSvg({ line1, line2, description, category, keyPoints, isBreaking, debug });
+
   const out = await sharp(bg)
-    .composite(layers)
+    .composite([{ input: photo, top: 0, left: 0 }, { input: svgBuf, top: 0, left: 0 }])
     .jpeg({ quality: 92, chromaSubsampling: '4:4:4' })
     .toBuffer();
 
   return uploadBufferToSupabase(out, `branded-${Date.now()}.jpg`, 'image/jpeg');
 }
 
-export default { buildBrandedImage, makeSummary };
+// ── Public API — Facebook (1200×630, link/photo post format) ───────
+// Same brand tokens/typography/safe-fitting as Instagram, landscape
+// composition instead of a resized square (no stretching).
+export async function buildBrandedImageForFacebook(imageUrl, headline, category, opts = {}) {
+  const { body = '', summary, isBreaking = false, debug = false } = opts;
+  const { line1, line2 } = resolveHeadlineLines(headline);
+  const description = summary || makeSummary(body, 140);
+
+  const photo = await downloadHero(imageUrl, FB_HERO_W, FB_H, { r: 68, g: 58, b: 122 });
+  const bg = await sharp({ create: { width: FB_W, height: FB_H, channels: 3, background: { r: 11, g: 11, b: 15 } } })
+    .png().toBuffer();
+  const svgBuf = buildFbSvg({ line1, line2, description, category, isBreaking, debug });
+
+  const out = await sharp(bg)
+    .composite([{ input: photo, top: 0, left: 0 }, { input: svgBuf, top: 0, left: 0 }])
+    .jpeg({ quality: 92, chromaSubsampling: '4:4:4' })
+    .toBuffer();
+
+  return uploadBufferToSupabase(out, `branded-fb-${Date.now()}.jpg`, 'image/jpeg');
+}
+
+export default { buildBrandedImage, buildBrandedImageForFacebook, makeSummary };
