@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════════════
 // NewsPost Auto — NVIDIA key pool + image AI + Sharp brand-overlay
-// Rotates through 3 keys (NVIDIA_KEY_1/2/3) on 429 / auth errors.
+// Rotates through NVIDIA_KEY_1, NVIDIA_KEY_2, ... (any count) on 429 / auth errors.
 // ═══════════════════════════════════════════════════════════════════
 import axios from 'axios';
 import sharp from 'sharp';
@@ -11,12 +11,9 @@ const SANA_MODEL  = 'nvidia/sana-1.5-4.1b-1024px';
 
 // ── Key pool ─────────────────────────────────────────────────────────
 function getKeys() {
-  const keys = [
-    process.env.NVIDIA_KEY_1,
-    process.env.NVIDIA_KEY_2,
-    process.env.NVIDIA_KEY_3,
-  ].filter(Boolean);
-  if (!keys.length) throw new Error('No NVIDIA keys set (NVIDIA_KEY_1/2/3 in .env)');
+  const keys = [];
+  for (let i = 1; process.env[`NVIDIA_KEY_${i}`]; i++) keys.push(process.env[`NVIDIA_KEY_${i}`]);
+  if (!keys.length) throw new Error('No NVIDIA keys set (NVIDIA_KEY_1, NVIDIA_KEY_2, ... in .env)');
   return keys;
 }
 

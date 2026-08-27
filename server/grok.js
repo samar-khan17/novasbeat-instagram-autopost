@@ -1,22 +1,25 @@
 // ═══════════════════════════════════════════════════════════════════
 // NewsPost Auto — AI text generation via NVIDIA NIM
-// Uses NVIDIA_KEY_1/2/3 key pool with automatic rotation on 429/401.
-// Model: meta/llama-3.3-70b-instruct  (OpenAI-compatible endpoint)
+// Uses NVIDIA_KEY_1, NVIDIA_KEY_2, ... key pool (any count) with rotation on 429/401.
+// Model: nvidia/nemotron-3-super-120b-a12b (OpenAI-compatible endpoint)
+// meta/llama-3.3-70b-instruct reached NVIDIA end-of-life 2026-08-26.
+// This model is reasoning-first — chat_template_kwargs:{thinking:false}
+// (NOT the old "detailed thinking off" system-prompt trick, which this
+// generation ignores) is required or every call burns max_tokens on
+// chain-of-thought and returns null/truncated content.
 // ═══════════════════════════════════════════════════════════════════
 import OpenAI from 'openai';
 
 const NVIDIA_BASE  = 'https://integrate.api.nvidia.com/v1';
-const NVIDIA_MODEL = process.env.NVIDIA_TEXT_MODEL || 'meta/llama-3.3-70b-instruct';
+const NVIDIA_MODEL = process.env.NVIDIA_TEXT_MODEL || 'nvidia/nemotron-3-super-120b-a12b';
+const THINKING_OFF = { chat_template_kwargs: { thinking: false } };
 
 let _keyIdx = 0;
 
 function getKeys() {
-  const keys = [
-    process.env.NVIDIA_KEY_1,
-    process.env.NVIDIA_KEY_2,
-    process.env.NVIDIA_KEY_3,
-  ].filter(Boolean);
-  if (!keys.length) throw new Error('No NVIDIA keys set (NVIDIA_KEY_1/2/3 in .env)');
+  const keys = [];
+  for (let i = 1; process.env[`NVIDIA_KEY_${i}`]; i++) keys.push(process.env[`NVIDIA_KEY_${i}`]);
+  if (!keys.length) throw new Error('No NVIDIA keys set (NVIDIA_KEY_1, NVIDIA_KEY_2, ... in .env)');
   return keys;
 }
 
@@ -69,6 +72,7 @@ export async function generateCaption(headline, body) {
       ],
       temperature: 0.75,
       max_tokens: 400,
+      ...THINKING_OFF,
     });
     return (res.choices?.[0]?.message?.content || '').trim();
   });
@@ -92,6 +96,7 @@ export async function generateHashtags(headline, body) {
       ],
       temperature: 0.6,
       max_tokens: 150,
+      ...THINKING_OFF,
     });
 
     let tags = (res.choices?.[0]?.message?.content || '').trim();
@@ -132,6 +137,7 @@ export async function generateKeyPoints(headline, body) {
         ],
         temperature: 0.4,
         max_tokens: 250,
+        ...THINKING_OFF,
       });
 
       const text  = (res.choices?.[0]?.message?.content || '').trim();
@@ -214,6 +220,7 @@ export async function generateShortHeadline(headline, body) {
         ],
         temperature: 0.7,
         max_tokens: 80,
+        ...THINKING_OFF,
       });
 
       const text  = (res.choices?.[0]?.message?.content || '').trim();
