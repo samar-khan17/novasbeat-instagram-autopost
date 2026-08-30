@@ -144,6 +144,43 @@ function getIconPath(type) {
   return ICON_PATHS[String(type || 'star').toLowerCase()] || ICON_PATHS.star;
 }
 
+// ── Real logo, fetched once and cached in memory ────────────────────
+// The site's logo changed (stylized "NB" monogram, replacing the old
+// plain "N"). Rather than hand-drawing letterforms in SVG — which goes
+// stale the next time the logo changes — embed the actual live icon as
+// a base64 <image>. Fetched lazily on first render, cached for the life
+// of the process; falls back to a plain purple square (no letterform)
+// if the fetch ever fails, so a render never crashes on this.
+let _logoDataUriPromise = null;
+async function getLogoDataUri() {
+  if (!_logoDataUriPromise) {
+    _logoDataUriPromise = (async () => {
+      try {
+        const dl = await axios.get('https://novasbeat.com/images/novasbeat-icon-512.png', {
+          responseType: 'arraybuffer', timeout: 15000,
+        });
+        const png = await sharp(Buffer.from(dl.data)).resize(160, 160).png().toBuffer();
+        return `data:image/png;base64,${png.toString('base64')}`;
+      } catch (e) {
+        console.warn('[brandImage] Logo fetch FAILED:', e.message, '→ using plain purple mark');
+        return null;
+      }
+    })();
+  }
+  return _logoDataUriPromise;
+}
+
+// Brand mark: rounded-square clipped logo image if available, else a
+// plain purple square (never blocks rendering on a failed fetch).
+function logoMarkSvg(x, y, size, logoUri, radius) {
+  const clipId = `logoClip${x}_${y}`;
+  if (logoUri) {
+    return `<clipPath id="${clipId}"><rect x="${x}" y="${y}" width="${size}" height="${size}" rx="${radius}"/></clipPath>
+  <image href="${logoUri}" x="${x}" y="${y}" width="${size}" height="${size}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>`;
+  }
+  return `<rect x="${x}" y="${y}" width="${size}" height="${size}" rx="${radius}" fill="url(#purpGrad)"/>`;
+}
+
 // ── Shared gradient/def block (identical brand tokens on both formats) ─
 function defsBlock(padX, w) {
   return `
@@ -176,7 +213,7 @@ function debugOverlay(w, h, padX, safeTop, safeBot) {
 // ═══════════════════════════════════════════════════════════════════
 // INSTAGRAM (1080×1080) — standard + breaking layouts
 // ═══════════════════════════════════════════════════════════════════
-function buildSvg({ line1, line2, description, category, keyPoints, isBreaking = false, debug = false }) {
+function buildSvg({ line1, line2, description, category, keyPoints, isBreaking = false, debug = false, logoUri = null }) {
   const { fs: HL_FS, lines: hlLines } = buildHeadlineLines(line1, line2, AVAIL, isBreaking ? 60 : 54, isBreaking ? 32 : 26);
   const HL_LH = Math.round(HL_FS * 1.05);
 
@@ -190,8 +227,12 @@ function buildSvg({ line1, line2, description, category, keyPoints, isBreaking =
     { title: 'Analysis',        desc: 'In-depth coverage & context',   icon: 'people' },
   ];
 
-  const CONT_Y = HERO_H;
-  let HL_TOP = CONT_Y + 24;
+  // Text cluster anchors at the same Y the old hard hero/content split
+  // used to sit at — but the photo now runs full-bleed behind it (no
+  // solid-color block), so this is purely a layout constant now, not a
+  // literal boundary between "photo zone" and "UI zone".
+  const TXT_ANCHOR = HERO_H;
+  let HL_TOP = TXT_ANCHOR + 24;
   const HL_BASE = Math.round(HL_FS * 0.82);
   let HL_BOT = HL_TOP + HL_LH * hlLines.length;
 
@@ -282,42 +323,48 @@ function buildSvg({ line1, line2, description, category, keyPoints, isBreaking =
   >${esc(String(kp.desc || '').slice(0, 38))}</text>`;
   }).join('');
 
+  // Text-zone gradient height is DYNAMIC — sized to whatever content is
+  // actually there (computed above via cascade), not a fixed hero split.
+  // Starts fading in well above the headline so the transition is gradual,
+  // not a hard line, and only darkens the lower portion of the photo —
+  // the top ~50% stays completely natural, uncovered.
+  const GRAD_TOP = Math.max(HERO_H - 40, HL_TOP - 90);
+
   return Buffer.from(`<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
 <defs>${defsBlock(PAD_X, W)}
-  <linearGradient id="heroOverlay" x1="0" y1="0" x2="0" y2="1">
-    <stop offset="0%"   stop-color="#241d44" stop-opacity="0.10"/>
-    <stop offset="55%"  stop-color="#141026" stop-opacity="0.55"/>
-    <stop offset="100%" stop-color="#0B0B0F" stop-opacity="1"/>
+  <!-- Legibility gradient — dynamically sized to the text zone only.
+       This is NOT a color tint: stops are pure black at varying alpha,
+       so hue/saturation of the photo underneath is fully preserved. -->
+  <linearGradient id="textGrad" gradientUnits="userSpaceOnUse"
+                  x1="0" y1="${GRAD_TOP}" x2="0" y2="${FT_Y}">
+    <stop offset="0%"   stop-color="#000000" stop-opacity="0"/>
+    <stop offset="45%"  stop-color="#000000" stop-opacity="0.55"/>
+    <stop offset="100%" stop-color="#000000" stop-opacity="0.86"/>
   </linearGradient>
-  <radialGradient id="heroVignette" cx="50%" cy="30%" r="70%" gradientUnits="objectBoundingBox">
-    <stop offset="40%"  stop-color="#0B0B0F" stop-opacity="0"/>
-    <stop offset="100%" stop-color="#0B0B0F" stop-opacity="0.5"/>
+  <!-- Subtle top scrim — just enough for the wordmark to read against a
+       bright sky or busy detail, not a recolor of the image. -->
+  <linearGradient id="topScrim" gradientUnits="userSpaceOnUse"
+                  x1="0" y1="0" x2="0" y2="170">
+    <stop offset="0%"   stop-color="#000000" stop-opacity="0.4"/>
+    <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+  </linearGradient>
+  <!-- Edge vignette — subtle darkening only at the outer edges/corners,
+       center stays fully clear and sharp. Pure black, no hue shift. -->
+  <radialGradient id="edgeVignette" cx="50%" cy="42%" r="75%" gradientUnits="objectBoundingBox">
+    <stop offset="62%"  stop-color="#000000" stop-opacity="0"/>
+    <stop offset="100%" stop-color="#000000" stop-opacity="0.38"/>
   </radialGradient>
-  <radialGradient id="heroGlowL" cx="20%" cy="0%" r="55%" gradientUnits="objectBoundingBox">
-    <stop offset="0%"   stop-color="#8A5CF6" stop-opacity="0.55"/>
-    <stop offset="100%" stop-color="#8A5CF6" stop-opacity="0"/>
-  </radialGradient>
-  <radialGradient id="heroGlowR" cx="85%" cy="10%" r="50%" gradientUnits="objectBoundingBox">
-    <stop offset="0%"   stop-color="#60A5FA" stop-opacity="0.45"/>
-    <stop offset="100%" stop-color="#60A5FA" stop-opacity="0"/>
-  </radialGradient>
-  <pattern id="heroGrid" width="40" height="40" patternUnits="userSpaceOnUse">
-    <line x1="0" y1="0" x2="40" y2="0" stroke="white" stroke-width="0.5" stroke-opacity="0.04"/>
-    <line x1="0" y1="0" x2="0" y2="40" stroke="white" stroke-width="0.5" stroke-opacity="0.04"/>
-  </pattern>
 </defs>
 
-<rect x="0" y="${CONT_Y}" width="${W}" height="${H - CONT_Y}" fill="#0B0B0F"/>
+<!-- Photo (composited below this SVG layer) runs the FULL 1080×1080
+     canvas — natural colors, no purple/blue tint, no hard hero/content
+     split. Only these three grayscale-alpha layers touch it. -->
+<rect x="0" y="0" width="${W}" height="${H}" fill="url(#edgeVignette)"/>
+<rect x="0" y="0" width="${W}" height="170" fill="url(#topScrim)"/>
+<rect x="0" y="${GRAD_TOP}" width="${W}" height="${FT_Y - GRAD_TOP}" fill="url(#textGrad)"/>
+<rect x="0" y="${FT_Y}" width="${W}" height="${H - FT_Y}" fill="#0B0B0F"/>
 
-<rect x="0" y="0" width="${W}" height="${HERO_H}" fill="url(#heroGlowL)"/>
-<rect x="0" y="0" width="${W}" height="${HERO_H}" fill="url(#heroGlowR)"/>
-<rect x="0" y="0" width="${W}" height="${HERO_H}" fill="url(#heroGrid)" opacity="0.5"/>
-<rect x="0" y="0" width="${W}" height="${HERO_H}" fill="url(#heroVignette)"/>
-<rect x="0" y="0" width="${W}" height="${HERO_H}" fill="url(#heroOverlay)"/>
-
-<rect x="30" y="30" width="64" height="64" rx="18" fill="rgba(138,92,246,0.3)"/>
-<rect x="36" y="36" width="52" height="52" rx="14" fill="url(#purpGrad)"/>
-<text x="62" y="71" font-family="${FP}" font-size="24" font-weight="800" fill="white" text-anchor="middle">N</text>
+${logoMarkSvg(36, 36, 52, logoUri, 14)}
 <text x="102" y="60" font-family="${FP}" font-size="21" font-weight="700" fill="white">Novas Beat</text>
 <text x="102" y="79" font-family="${FI}" font-size="12" font-style="italic" fill="#38E0D2">The world, unfiltered.</text>
 
@@ -356,9 +403,7 @@ ${cardsSvg}
 </g>
 
 <rect x="0" y="${FT_Y}" width="${W}" height="${FT_H}" fill="url(#ftGrad)"/>
-<rect x="${PAD_X}" y="${FT_CY - 21}" width="42" height="42" rx="12"
-      fill="rgba(255,255,255,0.16)" stroke="rgba(255,255,255,0.3)" stroke-width="1"/>
-<text x="${PAD_X + 21}" y="${FT_CY + 7}" font-family="${FP}" font-size="19" font-weight="800" fill="white" text-anchor="middle">N</text>
+${logoMarkSvg(PAD_X, FT_CY - 21, 42, logoUri, 12)}
 <text x="${PAD_X + 54}" y="${FT_CY - 2}" font-family="${FP}" font-size="17" font-weight="700" fill="white">novasbeat.com</text>
 <text x="${PAD_X + 54}" y="${FT_CY + 17}" font-family="${FI}" font-size="12.5" fill="rgba(255,255,255,0.8)"
 >AI-powered · Verified across hundreds of sources</text>
@@ -370,7 +415,7 @@ ${debug ? debugOverlay(W, H, PAD_X, HL_TOP - 24, FT_Y) : ''}
 // ═══════════════════════════════════════════════════════════════════
 // FACEBOOK (1200×630) — same brand tokens, landscape split composition
 // ═══════════════════════════════════════════════════════════════════
-function buildFbSvg({ line1, line2, description, category, isBreaking = false, debug = false }) {
+function buildFbSvg({ line1, line2, description, category, isBreaking = false, debug = false, logoUri = null }) {
   const textX = FB_HERO_W + FB_PAD;
   const { fs: HL_FS, lines: hlLines } = buildHeadlineLines(line1, line2, FB_AVAIL, 40, 22);
   const HL_LH = Math.round(HL_FS * 1.08);
@@ -396,13 +441,21 @@ function buildFbSvg({ line1, line2, description, category, isBreaking = false, d
   const DESC_Y1 = DESC_TOP + Math.round(DESC_FS * 0.82);
 
   return Buffer.from(`<svg width="${FB_W}" height="${FB_H}" xmlns="http://www.w3.org/2000/svg">
-<defs>${defsBlock(FB_PAD, FB_W)}</defs>
+<defs>${defsBlock(FB_PAD, FB_W)}
+  <!-- Soft seam blend so the photo→panel edge isn't a hard vertical
+       line — pure black alpha fade, doesn't touch the photo's hue. -->
+  <linearGradient id="seamBlend" gradientUnits="userSpaceOnUse" x1="${FB_HERO_W - 70}" y1="0" x2="${FB_HERO_W}" y2="0">
+    <stop offset="0%"   stop-color="#000000" stop-opacity="0"/>
+    <stop offset="100%" stop-color="#000000" stop-opacity="0.28"/>
+  </linearGradient>
+</defs>
 
 <!-- Only the text column gets a background fill — the hero photo (left
-     ${FB_HERO_W}px, composited below this SVG layer) must stay visible. -->
+     ${FB_HERO_W}px, composited below this SVG layer) stays fully visible
+     and unrecolored. -->
+<rect x="${FB_HERO_W - 70}" y="0" width="70" height="${FB_H}" fill="url(#seamBlend)"/>
 <rect x="${FB_HERO_W}" y="0" width="${FB_W - FB_HERO_W}" height="${FB_H}" fill="#0B0B0F"/>
-<rect x="${textX}" y="${TOP}" width="26" height="26" rx="7" fill="url(#purpGrad)"/>
-<text x="${textX + 13}" y="${TOP + 19}" font-family="${FP}" font-size="13" font-weight="800" fill="white" text-anchor="middle">N</text>
+${logoMarkSvg(textX, TOP, 26, logoUri, 7)}
 <text x="${textX + 36}" y="${TOP + 19}" font-family="${FP}" font-size="15" font-weight="700" fill="white">Novas Beat</text>
 
 <rect x="${textX}" y="${TOP + 34}" width="${catW}" height="26" rx="7" fill="url(#purpGrad)"/>
@@ -465,10 +518,18 @@ export async function buildBrandedImage(imageUrl, headline, category, opts = {})
   const { line1, line2 } = resolveHeadlineLines(headline);
   const description = summary || makeSummary(body, 160);
 
-  const photo = await downloadHero(imageUrl, W, HERO_H, { r: 68, g: 58, b: 122 });
+  // Full-bleed photo — natural colors preserved across the WHOLE canvas,
+  // not just a 560px top strip. This is the actual fix for "every post
+  // looks the same purple thing": the photo's own colors now drive the
+  // post's visual identity; only alpha-only vignette/gradient layers
+  // touch it (see buildSvg), never a hue/color tint.
+  const [photo, logoUri] = await Promise.all([
+    downloadHero(imageUrl, W, H, { r: 68, g: 58, b: 122 }),
+    getLogoDataUri(),
+  ]);
   const bg = await sharp({ create: { width: W, height: H, channels: 3, background: { r: 11, g: 11, b: 15 } } })
     .png().toBuffer();
-  const svgBuf = buildSvg({ line1, line2, description, category, keyPoints, isBreaking, debug });
+  const svgBuf = buildSvg({ line1, line2, description, category, keyPoints, isBreaking, debug, logoUri });
 
   const out = await sharp(bg)
     .composite([{ input: photo, top: 0, left: 0 }, { input: svgBuf, top: 0, left: 0 }])
@@ -486,10 +547,13 @@ export async function buildBrandedImageForFacebook(imageUrl, headline, category,
   const { line1, line2 } = resolveHeadlineLines(headline);
   const description = summary || makeSummary(body, 140);
 
-  const photo = await downloadHero(imageUrl, FB_HERO_W, FB_H, { r: 68, g: 58, b: 122 });
+  const [photo, logoUri] = await Promise.all([
+    downloadHero(imageUrl, FB_HERO_W, FB_H, { r: 68, g: 58, b: 122 }),
+    getLogoDataUri(),
+  ]);
   const bg = await sharp({ create: { width: FB_W, height: FB_H, channels: 3, background: { r: 11, g: 11, b: 15 } } })
     .png().toBuffer();
-  const svgBuf = buildFbSvg({ line1, line2, description, category, isBreaking, debug });
+  const svgBuf = buildFbSvg({ line1, line2, description, category, isBreaking, debug, logoUri });
 
   const out = await sharp(bg)
     .composite([{ input: photo, top: 0, left: 0 }, { input: svgBuf, top: 0, left: 0 }])
