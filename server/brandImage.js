@@ -90,18 +90,6 @@ function textWidthPx(text, fontSize) {
   return em * fontSize;
 }
 
-// Iteratively find the largest font size (maxFs→minFs) at which BOTH
-// headline lines actually fit `avail` width using real per-char
-// measurement — guarantees no silent SVG-boundary clipping.
-function headlineFontSize(line1, line2, avail, maxFs = 54, minFs = 26) {
-  const l1 = String(line1 || ''), l2 = String(line2 || '');
-  if (!l1 && !l2) return maxFs;
-  for (let fs = maxFs; fs >= minFs; fs--) {
-    if (textWidthPx(l1, fs) <= avail && textWidthPx(l2, fs) <= avail) return fs;
-  }
-  return minFs;
-}
-
 // If a headline line still doesn't fit `avail` even at minFs (e.g. one
 // very long word-heavy line), split it into two so nothing ever renders
 // past the canvas edge. Returns an array of 1-2 lines.
@@ -118,13 +106,61 @@ function fitOrSplitLine(line, fontSize, avail) {
   return [words.slice(0, best).join(' '), words.slice(best).join(' ')];
 }
 
-function buildHeadlineLines(line1, line2, avail, maxFs = 54, minFs = 26) {
-  const fs = headlineFontSize(line1, line2, avail, maxFs, minFs);
-  const lines = [
-    ...fitOrSplitLine(line1, fs, avail).map(t => ({ text: t, grad: false })),
-    ...fitOrSplitLine(line2, fs, avail).map(t => ({ text: t, grad: true })),
-  ].filter(l => l.text).slice(0, 4);
-  return { fs, lines };
+// ── 3-tier headline: small top line → BIG emphasized middle → small
+// bottom line. line1 becomes the top tier as-is; line2 gets split into
+// a short emphasized "mid" phrase (the important name/number/point) and
+// whatever's left as a smaller closing line — so a single AI-generated
+// {line1, line2} pair (unchanged upstream) drives a proper small/BIG/
+// small rhythm instead of two same-size lines.
+function splitEmphasis(line2) {
+  const words = String(line2 || '').trim().split(/\s+/).filter(Boolean);
+  if (words.length <= 1) return { mid: words.join(' '), bot: '' };
+  // Take 2 words instead of 1 when the first word is short (e.g. "A",
+  // "THE", "NEW") so the emphasized phrase still reads as substantial.
+  const take = (words[0].length <= 3 && words.length > 2) ? 2 : 1;
+  return { mid: words.slice(0, take).join(' '), bot: words.slice(take).join(' ') };
+}
+
+// Finds the largest `fs` (the MID/emphasis size) at which top (0.44×fs),
+// mid (1×fs), and bottom (0.4×fs) all fit `avail` — real per-char
+// measurement per tier, then per-line split-fallback as a last resort.
+function buildHeadlineTiers(line1, line2, avail, maxFs = 64, minFs = 30) {
+  const top = String(line1 || '').trim();
+  const { mid, bot } = splitEmphasis(line2);
+  const TOP_R = 0.46, BOT_R = 0.42;
+
+  let fs = maxFs;
+  for (; fs >= minFs; fs--) {
+    if (textWidthPx(top, Math.round(fs * TOP_R)) <= avail &&
+        textWidthPx(mid, fs) <= avail &&
+        textWidthPx(bot, Math.round(fs * BOT_R)) <= avail) break;
+  }
+  fs = Math.max(fs, minFs);
+  const topFs = Math.round(fs * TOP_R), botFs = Math.round(fs * BOT_R);
+
+  const lines = [];
+  fitOrSplitLine(top, topFs, avail).filter(Boolean).forEach(t => lines.push({ text: t, size: topFs, grad: false }));
+  fitOrSplitLine(mid, fs, avail).filter(Boolean).forEach(t => lines.push({ text: t, size: fs, grad: true }));
+  if (bot) fitOrSplitLine(bot, botFs, avail).filter(Boolean).forEach(t => lines.push({ text: t, size: botFs, grad: false }));
+
+  return { lines: lines.slice(0, 6), midFs: fs };
+}
+
+// Renders a tiered-size line array as SVG <text> elements, each line's
+// own line-height stacking correctly. Returns the markup plus the total
+// block height so callers can cascade the rest of the layout below it.
+function renderHeadlineTiers(lines, x, anchor, startY) {
+  let y = startY;
+  let markup = '';
+  for (const l of lines) {
+    const lh = Math.round(l.size * 1.08);
+    y += lh;
+    const baseline = y - Math.round(lh - l.size * 0.82);
+    markup += `<text x="${x}" y="${baseline}" font-family="${FP}" font-size="${l.size}" font-weight="800"
+      fill="${l.grad ? 'url(#hl2Grad)' : 'white'}" text-anchor="${anchor}"
+      letter-spacing="${(-l.size * 0.01).toFixed(1)}">${esc(l.text.toUpperCase())}</text>\n`;
+  }
+  return { markup, bottomY: y };
 }
 
 // ── Icon paths: 24×24 viewBox, filled white ────────────────────────
@@ -214,8 +250,9 @@ function debugOverlay(w, h, padX, safeTop, safeBot) {
 // INSTAGRAM (1080×1080) — standard + breaking layouts
 // ═══════════════════════════════════════════════════════════════════
 function buildSvg({ line1, line2, description, category, keyPoints, isBreaking = false, debug = false, logoUri = null }) {
-  const { fs: HL_FS, lines: hlLines } = buildHeadlineLines(line1, line2, AVAIL, isBreaking ? 60 : 54, isBreaking ? 32 : 26);
-  const HL_LH = Math.round(HL_FS * 1.05);
+  const { lines: hlTiers } = buildHeadlineTiers(line1, line2, AVAIL, isBreaking ? 76 : 64, isBreaking ? 38 : 30);
+  const hlBlockH = hlTiers.reduce((sum, l) => sum + Math.round(l.size * 1.08), 0);
+  const HL_CX = W / 2;
 
   const descLines = wrapText(String(description || ''), 68, 2);
   const DESC_FS  = 19;
@@ -233,8 +270,7 @@ function buildSvg({ line1, line2, description, category, keyPoints, isBreaking =
   // literal boundary between "photo zone" and "UI zone".
   const TXT_ANCHOR = HERO_H;
   let HL_TOP = TXT_ANCHOR + 24;
-  const HL_BASE = Math.round(HL_FS * 0.82);
-  let HL_BOT = HL_TOP + HL_LH * hlLines.length;
+  let HL_BOT = HL_TOP + hlBlockH;
 
   // ── Automatic layout validation ─────────────────────────────────
   // Breaking-news posts skip the icon cards (phase-13 dedicated
@@ -377,10 +413,7 @@ ${isBreaking ? `<rect x="${W - 36 - 175}" y="36" width="175" height="34" rx="17"
 <text x="${W - 36 - 175 + 30}" y="57" font-family="${FP}" font-size="14" font-weight="700" fill="white"
       letter-spacing="0.5">BREAKING NEWS</text>` : ''}
 
-${hlLines.map((l, i) => `<text x="${PAD_X}" y="${HL_TOP + HL_BASE + i * HL_LH}"
-      font-family="${FP}" font-size="${HL_FS}" font-weight="800" fill="${l.grad ? 'url(#hl2Grad)' : 'white'}"
-      letter-spacing="${(-HL_FS * 0.01).toFixed(1)}"
->${esc(l.text.toUpperCase())}</text>`).join('\n')}
+${renderHeadlineTiers(hlTiers, HL_CX, 'middle', HL_TOP).markup}
 
 ${descLinesUsed.length ? `<rect x="${PAD_X}" y="${DESC_TOP}" width="3"
       height="${DESC_LH * descLinesUsed.length + 4}" rx="1.5" fill="#8A5CF6"/>
@@ -417,8 +450,8 @@ ${debug ? debugOverlay(W, H, PAD_X, HL_TOP - 24, FT_Y) : ''}
 // ═══════════════════════════════════════════════════════════════════
 function buildFbSvg({ line1, line2, description, category, isBreaking = false, debug = false, logoUri = null }) {
   const textX = FB_HERO_W + FB_PAD;
-  const { fs: HL_FS, lines: hlLines } = buildHeadlineLines(line1, line2, FB_AVAIL, 40, 22);
-  const HL_LH = Math.round(HL_FS * 1.08);
+  const { lines: hlTiers } = buildHeadlineTiers(line1, line2, FB_AVAIL, 46, 24);
+  const hlBlockH = hlTiers.reduce((sum, l) => sum + Math.round(l.size * 1.08), 0);
 
   const descLines = wrapText(String(description || ''), 42, 3);
   const DESC_FS = 16, DESC_LH = Math.round(DESC_FS * 1.5);
@@ -428,15 +461,14 @@ function buildFbSvg({ line1, line2, description, category, isBreaking = false, d
 
   const FT_Y = FB_H - 56;
   const BRAND_H = 34 + 20; // brand row + gap, fixed at top
-  const contentH = HL_LH * hlLines.length + 18 + DESC_LH * Math.max(1, descLines.length);
+  const contentH = hlBlockH + 18 + DESC_LH * Math.max(1, descLines.length);
   // Vertically center the headline+description block in the space between
   // the brand row and the footer, instead of anchoring it to the top and
   // leaving a large dead gap above the footer.
   const TOP = 40;
   const blockTop = TOP + BRAND_H + Math.max(0, Math.round((FT_Y - 24 - (TOP + BRAND_H) - contentH) / 2));
   const HL_TOP = blockTop;
-  const HL_BASE = Math.round(HL_FS * 0.82);
-  const HL_BOT = HL_TOP + HL_LH * hlLines.length;
+  const HL_BOT = HL_TOP + hlBlockH;
   const DESC_TOP = HL_BOT + 18;
   const DESC_Y1 = DESC_TOP + Math.round(DESC_FS * 0.82);
 
@@ -465,10 +497,7 @@ ${isBreaking ? `<rect x="${textX + catW + 10}" y="${TOP + 34}" width="120" heigh
 <circle cx="${textX + catW + 26}" cy="${TOP + 47}" r="3" fill="white"/>
 <text x="${textX + catW + 36}" y="${TOP + 51}" font-family="${FP}" font-size="11" font-weight="700" fill="white">BREAKING</text>` : ''}
 
-${hlLines.map((l, i) => `<text x="${textX}" y="${HL_TOP + HL_BASE + i * HL_LH}"
-      font-family="${FP}" font-size="${HL_FS}" font-weight="800" fill="${l.grad ? 'url(#hl2Grad)' : 'white'}"
-      letter-spacing="${(-HL_FS * 0.01).toFixed(1)}"
->${esc(l.text.toUpperCase())}</text>`).join('\n')}
+${renderHeadlineTiers(hlTiers, textX, 'start', HL_TOP).markup}
 
 ${descLines.map((dl, i) => `<text x="${textX}" y="${DESC_Y1 + i * DESC_LH}"
       font-family="${FI}" font-size="${DESC_FS}" fill="#D8D6E3">${esc(dl)}</text>`).join('\n')}
@@ -482,6 +511,37 @@ ${debug ? debugOverlay(FB_W, FB_H, FB_PAD, TOP, FT_Y) : ''}
 </svg>`);
 }
 
+// ── Edge blur — genuine gaussian blur, not just darkening ──────────
+// A radial alpha mask (transparent center, opaque edges) is rasterized
+// from SVG, used to reveal a blurred copy of the photo ONLY at the
+// edges via 'dest-in', then that ring is composited over the sharp
+// original. Center stays fully sharp; only the outer ring is blurred —
+// this is real blur, not a vignette standing in for it.
+async function buildEdgeMask(w, h) {
+  const svg = `<svg width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg">
+<defs><radialGradient id="m" cx="50%" cy="50%" r="72%">
+  <stop offset="52%" stop-color="white" stop-opacity="0"/>
+  <stop offset="100%" stop-color="white" stop-opacity="1"/>
+</radialGradient></defs>
+<rect width="${w}" height="${h}" fill="url(#m)"/>
+</svg>`;
+  return sharp(Buffer.from(svg)).png().toBuffer();
+}
+
+async function applyEdgeBlur(photoBuf, w, h, sigma = 16) {
+  try {
+    const [blurred, mask] = await Promise.all([
+      sharp(photoBuf).blur(sigma).toBuffer(),
+      buildEdgeMask(w, h),
+    ]);
+    const ring = await sharp(blurred).composite([{ input: mask, blend: 'dest-in' }]).png().toBuffer();
+    return await sharp(photoBuf).composite([{ input: ring, top: 0, left: 0 }]).jpeg({ quality: 90 }).toBuffer();
+  } catch (e) {
+    console.warn('[brandImage] Edge blur FAILED:', e.message, '→ using unblurred photo');
+    return photoBuf;
+  }
+}
+
 // ── Shared photo download + hero fit ───────────────────────────────
 async function downloadHero(imageUrl, w, h, fallbackColor) {
   if (imageUrl) {
@@ -490,8 +550,9 @@ async function downloadHero(imageUrl, w, h, fallbackColor) {
         responseType: 'arraybuffer', timeout: 25000,
         headers: { 'User-Agent': 'Mozilla/5.0 (compatible; NewsPostAuto/1.0)' },
       });
-      return await sharp(Buffer.from(dl.data)).resize(w, h, { fit: 'cover', position: 'attention' })
+      const cropped = await sharp(Buffer.from(dl.data)).resize(w, h, { fit: 'cover', position: 'attention' })
         .jpeg({ quality: 90 }).toBuffer();
+      return await applyEdgeBlur(cropped, w, h);
     } catch (e) {
       console.warn('[brandImage] Photo download FAILED:', e.message, '→ using gradient hero');
     }
