@@ -353,9 +353,25 @@ function buildStandardSvg({ line1, line2, description, category, source, isBreak
   const cat = esc(String(category || 'News').toUpperCase());
   const catW = Math.max(90, cat.length * 11 + 40);
 
-  const FT_RULE_Y = H - 72 - 26;
-  const HL_TOP = 712, HL_BOX_H = FT_RULE_Y - 40 - HL_TOP;
-  const { fs: HL_FS, lines: hlLines, lh: HL_LH } = fitHeadlineBox(headline, AVAIL_ED, HL_BOX_H, 82, 0.78, 1.02, 4);
+  // Footer hugs the ACTUAL headline content (headlineBottom + a small
+  // fixed gap) instead of sitting at a fixed distance from the bottom —
+  // that fixed-position approach left a large dead gap under short
+  // headlines. The box height passed to the fitter still reserves the
+  // worst-case footer room, so a long headline can never push the
+  // footer off-canvas.
+  // The box passed to the fitter reserves real room down to a fixed
+  // 90px footer minimum (2 lines of mono footer text) — NOT a tight
+  // budget matched to the "ideal" 106px size. A long headline with an
+  // unbreakable long word (e.g. "reforestation") can still need more
+  // than 106px×4-lines worth of room; the floor ratio here (0.42) is
+  // real headroom, not a stylistic choice, so the fitter can always
+  // reach a size that truly fits before ever falling back to
+  // truncation. Footer then hugs whatever height the headline actually
+  // used, by construction never overflowing.
+  const FOOTER_GAP = 48, FOOTER_RESERVE = 90;
+  const HL_TOP = 712, HL_BOX_H = H - FOOTER_RESERVE - FOOTER_GAP - HL_TOP;
+  const { fs: HL_FS, lines: hlLines, lh: HL_LH } = fitHeadlineBox(headline, AVAIL_ED, HL_BOX_H, 106, 0.42, 0.98, 8);
+  const FT_RULE_Y = HL_TOP + hlLines.length * HL_LH + FOOTER_GAP;
 
   return Buffer.from(`<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
 <defs>${defsBlock(MARGIN, W)}
@@ -613,9 +629,9 @@ function resolveHeadlineLines(headline) {
 function pickVariant(headlineText, isBreaking, explicit) {
   if (explicit) return explicit;
   if (isBreaking) return 'breaking';
-  let h = 0;
-  for (const ch of String(headlineText || '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  return (h % 2 === 0) ? 'standard' : 'cinematic';
+  // Standard Editorial only — no rotation to Cinematic. Explicitly
+  // requested: one consistent post style, not a mix.
+  return 'standard';
 }
 
 // ── Public API — Instagram (1080×1080, primary format) ─────────────
