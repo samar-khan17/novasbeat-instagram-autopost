@@ -445,7 +445,14 @@ function buildStandardSvg({ line1, line2, category, publishedAt, debug, logoUri 
 
   // Two-part headline: line1 (context) regular, line2 (the actual news
   // point) rendered bigger — capped at 3 lines total, real fit search.
-  const fit = fitTwoPartHeadline(line1, line2, AVAIL_ED, HL_BOX_H, 108, 0.5, 1.22, 3);
+  // 4 lines allowed (was 3) — the panel height itself never grows, but
+  // capping at 3 lines was an artificial constraint that forced smaller
+  // font on moderately long headlines even when the actual pixel-height
+  // budget had room at a bigger size wrapped over 4 lines instead. Floor
+  // ratio raised (0.5->0.62) so size stays visually consistent with the
+  // short-headline cases by default; the hard 24px safety net below
+  // still guarantees no content is ever lost.
+  const fit = fitTwoPartHeadline(line1, line2, AVAIL_ED, HL_BOX_H, 108, 0.62, 1.22, 4);
   const startY = HL_TOP + Math.max(0, Math.round((HL_BOX_H - fit.totalH) / 2));
 
   return Buffer.from(`<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
