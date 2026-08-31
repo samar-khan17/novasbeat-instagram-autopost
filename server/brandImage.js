@@ -32,6 +32,23 @@ const MIN_FOOTER_H = 90;  // footer must always keep at least this much room
 // ── Font families (best system equivalents for Poppins / Inter) ───
 const FP = "'Arial Black','Segoe UI Black',Impact,sans-serif";
 const FI = "'Arial','Segoe UI',Helvetica,sans-serif";
+// Mono — stands in for IBM Plex Mono (not installed on the render host);
+// used for category/metadata/footer per the editorial spec.
+const FM = "'Courier New','DejaVu Sans Mono',monospace";
+
+// ── Editorial design system tokens (per NOVAS-BEAT-DESIGN-SPEC.md) ──
+// The one rule: never tint the photograph. Purple appears ONLY in these
+// UI elements — pills, category text, accent rules, the breaking bar,
+// card borders, the logo mark. Never as a wash over the photo itself.
+const ACCENT       = '#8B2FD9';
+const ACCENT_LIGHT = '#A76BFF';
+const ACCENT_TEXT  = '#CFB4FF';
+const PAPER        = '#F4F2EF';
+const INK          = '#141216';
+const INK_60       = '#4B4653';
+const RULE_ON_PHOTO = 'rgba(255,255,255,.22)';
+const META_ON_PHOTO = 'rgba(255,255,255,.72)';
+const MARGIN = 72; // outer margin, editorial grid
 
 // ── Helpers ───────────────────────────────────────────────────────
 function esc(s) {
@@ -163,6 +180,53 @@ function renderHeadlineTiers(lines, x, anchor, startY) {
   return { markup, bottomY: y };
 }
 
+// ── Box-fit headline: real word-wrap at a given font size, then shrink
+// in steps to a floor ratio if it still overflows the box — this is the
+// spec's "fitter" (section 3), reimplemented against real per-char
+// measurement instead of a browser's scrollHeight, since we have no DOM.
+function wrapByWidth(text, fontSize, avail) {
+  const words = String(text || '').trim().split(/\s+/).filter(Boolean);
+  const lines = []; let line = '';
+  for (const w of words) {
+    const cand = line ? `${line} ${w}` : w;
+    if (textWidthPx(cand, fontSize) > avail && line) { lines.push(line); line = w; }
+    else line = cand;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function fitHeadlineBox(text, boxW, boxH, maxFs, minRatio = 0.78, lhRatio = 1.02, maxLines = 4) {
+  const minFs = Math.round(maxFs * minRatio);
+  for (let fs = maxFs; fs >= minFs; fs -= 2) {
+    const lines = wrapByWidth(text, fs, boxW);
+    const lh = Math.round(fs * lhRatio);
+    if (lines.length <= maxLines && lines.length * lh <= boxH) return { fs, lines, lh };
+  }
+  // Last resort — spec says drop optional content first (callers do that
+  // before reaching here); if we still can't fit, use the floor size and
+  // truncate rather than let text spill past the box.
+  const fs = minFs, lh = Math.round(fs * lhRatio);
+  let lines = wrapByWidth(text, fs, boxW).slice(0, maxLines);
+  if (lines.length) lines[lines.length - 1] = lines[lines.length - 1].replace(/[.,;:]+$/, '') + '…';
+  return { fs, lines, lh };
+}
+
+// ── Sample the photo's own dominant colour, darkened, for the scrim —
+// "a desaturated darkening of the photo's own family" per spec, instead
+// of a fixed purple/black tint. Falls back to near-black if sampling
+// fails (never blocks a render).
+async function dominantColor(photoBuf) {
+  try {
+    const { data } = await sharp(photoBuf).resize(1, 1).raw().toBuffer({ resolveWithObject: true });
+    const [r, g, b] = data;
+    // Darken toward the photo's own hue family rather than pure black.
+    return { r: Math.round(r * 0.16), g: Math.round(g * 0.16), b: Math.round(b * 0.16) };
+  } catch {
+    return { r: 8, g: 8, b: 10 };
+  }
+}
+
 // ── Icon paths: 24×24 viewBox, filled white ────────────────────────
 const ICON_PATHS = {
   law:    'M12 2L4 7v2h16V7l-8-5zM4 21h16v-2H4v2zm2-9h2v6H6v-6zm4 0h2v6h-2v-6zm4 0h2v6h-2v-6zm4 0h2v6h-2v-6z',
@@ -247,201 +311,172 @@ function debugOverlay(w, h, padX, safeTop, safeBot) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// INSTAGRAM (1080×1080) — standard + breaking layouts
+// EDITORIAL DESIGN SYSTEM — Standard / Cinematic / Breaking
+// (per NOVAS-BEAT-DESIGN-SPEC.md — three of the spec's six compositions,
+// the most visually distinct; Informational/Feature/Sports are natural
+// follow-ons using the same building blocks below if wanted later.)
 // ═══════════════════════════════════════════════════════════════════
-function buildSvg({ line1, line2, description, category, keyPoints, isBreaking = false, debug = false, logoUri = null }) {
-  const { lines: hlTiers } = buildHeadlineTiers(line1, line2, AVAIL, isBreaking ? 76 : 64, isBreaking ? 38 : 30);
-  const hlBlockH = hlTiers.reduce((sum, l) => sum + Math.round(l.size * 1.08), 0);
-  const HL_CX = W / 2;
 
-  const descLines = wrapText(String(description || ''), 68, 2);
-  const DESC_FS  = 19;
-  const DESC_LH  = Math.round(DESC_FS * 1.5);
+// Lockup: NB mark + wordmark + tagline. Always sits on photography in
+// all three compositions (even Standard, where it's positioned in the
+// photo's top region above the paper panel), so it always uses the
+// on-dark styling — never the on-paper ink variant.
+function lockupSvg(x, y, logoUri) {
+  return `${logoMarkSvg(x, y, 58, logoUri, 16)}
+<text x="${x + 74}" y="${y + 27}" font-family="${FP}" font-size="27" font-weight="800" fill="white"
+      letter-spacing="2.5">NOVAS BEAT</text>
+<text x="${x + 74}" y="${y + 47}" font-family="${FM}" font-size="16" fill="${ACCENT_LIGHT}"
+      letter-spacing="1.2">THE WORLD, UNFILTERED</text>`;
+}
 
-  const KP = Array.isArray(keyPoints) && keyPoints.length >= 3 ? keyPoints.slice(0, 3) : [
-    { title: 'Breaking Update', desc: 'Major development unfolding',    icon: 'fire'   },
-    { title: 'Global Impact',   desc: 'Worldwide attention & reaction', icon: 'globe'  },
-    { title: 'Analysis',        desc: 'In-depth coverage & context',   icon: 'people' },
-  ];
+// Footer: hairline rule + a space-between mono row. Minimal — no
+// purple bar. `onPhoto` switches ink vs. white/meta colouring so it
+// reads correctly whether it lands on the paper panel or on photography.
+function footerSvg(x1, x2, y, leftText, rightText, onPhoto) {
+  const ruleColor = onPhoto ? RULE_ON_PHOTO : '#CFCAC2';
+  const textColor = onPhoto ? META_ON_PHOTO : INK_60;
+  return `<line x1="${x1}" y1="${y}" x2="${x2}" y2="${y}" stroke="${ruleColor}" stroke-width="1"/>
+<text x="${x1}" y="${y + 30}" font-family="${FM}" font-size="18" fill="${textColor}" letter-spacing="1.4">${esc(leftText)}</text>
+<text x="${x2}" y="${y + 30}" font-family="${FM}" font-size="18" fill="${textColor}" letter-spacing="1.4" text-anchor="end">${esc(rightText)}</text>`;
+}
 
-  // Text cluster anchors at the same Y the old hard hero/content split
-  // used to sit at — but the photo now runs full-bleed behind it (no
-  // solid-color block), so this is purely a layout constant now, not a
-  // literal boundary between "photo zone" and "UI zone".
-  const TXT_ANCHOR = HERO_H;
-  let HL_TOP = TXT_ANCHOR + 24;
-  let HL_BOT = HL_TOP + hlBlockH;
+function todayLabel() {
+  return new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).toUpperCase();
+}
 
-  // ── Automatic layout validation ─────────────────────────────────
-  // Breaking-news posts skip the icon cards (phase-13 dedicated
-  // treatment — headline dominant, less clutter) but keep ONE short
-  // supporting line, not zero — an empty content area just dumps all
-  // the leftover space into a giant blank footer, which looks broken
-  // in the other direction. Standard posts try description+cards, but
-  // if the resulting footer would be squeezed below MIN_FOOTER_H, drop
-  // cards first, then trim description to 1 line — footer never
-  // collapses or overflows either way.
-  let showCards = !isBreaking;
-  let descLinesUsed = isBreaking ? wrapText(String(description || ''), 72, 1) : descLines;
+// ── A. STANDARD EDITORIAL — photo top 648, paper panel below ────────
+function buildStandardSvg({ line1, line2, description, category, source, isBreaking, debug, logoUri }) {
+  const headline = [line1, line2].filter(Boolean).join(' ');
+  const PHOTO_H = 648;
+  const AVAIL_ED = W - MARGIN * 2;
 
-  function cascade(withCards, descCount) {
-    const DESC_TOP = HL_BOT + 22;
-    const DESC_BOT = descCount ? DESC_TOP + DESC_LH * descCount : HL_BOT;
-    const ICO_TOP = DESC_BOT + (withCards ? 26 : 0);
-    const ICO_H   = withCards ? 76 : 0;
-    const ICO_BOT = ICO_TOP + ICO_H;
-    const META_Y   = ICO_BOT + (withCards ? 22 : 30);
-    const META_TOP = META_Y + 18;
-    const BTN_H  = 41;
-    const META_BOT = META_TOP + BTN_H;
-    const FT_Y  = META_BOT + 20;
-    return { DESC_TOP, DESC_BOT, ICO_TOP, ICO_H, ICO_BOT, META_Y, META_TOP, BTN_H, META_BOT, FT_Y };
-  }
+  const cat = esc(String(category || 'News').toUpperCase());
+  const catW = Math.max(90, cat.length * 11 + 40);
 
-  let C = cascade(showCards, descLinesUsed.length);
-  if (H - C.FT_Y < MIN_FOOTER_H && showCards) {
-    showCards = false;
-    C = cascade(showCards, descLinesUsed.length);
-  }
-  if (H - C.FT_Y < MIN_FOOTER_H && descLinesUsed.length > 1) {
-    descLinesUsed = descLinesUsed.slice(0, 1);
-    C = cascade(showCards, descLinesUsed.length);
-  }
-  // If content is short (typically the breaking layout with no cards),
-  // the footer would otherwise stretch into a large empty purple block.
-  // Cap it and push the reclaimed space back up as breathing room above
-  // the headline instead — reads as an intentional, centered composition.
-  const MAX_FOOTER_H = 130;
-  const excess = (H - C.FT_Y) - MAX_FOOTER_H;
-  if (excess > 0) {
-    HL_TOP += excess;
-    HL_BOT += excess;
-    C = cascade(showCards, descLinesUsed.length);
-  }
-  const { DESC_TOP, DESC_BOT, ICO_TOP, ICO_H, ICO_BOT, META_Y, META_TOP, BTN_H, META_BOT, FT_Y } = C;
-  const DESC_Y1 = DESC_TOP + Math.round(DESC_FS * 0.82);
-  const FT_H = H - FT_Y;
-  const FT_CY = FT_Y + FT_H / 2;
-
-  const BTN_W  = 396;
-  const BTN_X  = W - PAD_X - BTN_W;
-  const BTN_Y  = META_TOP;
-  const BTN_CY = BTN_Y + BTN_H / 2;
-
-  const cat  = esc(String(category || 'News').toUpperCase());
-  const catW = Math.max(90, cat.length * 10 + 44);
-  const catH = 36;
-
-  const ICO_GAP = 18;
-  const ICO_W   = Math.floor((AVAIL - ICO_GAP * 2) / 3);
-  const ICO_XS  = [PAD_X, PAD_X + ICO_W + ICO_GAP, PAD_X + (ICO_W + ICO_GAP) * 2];
-  const ICON_BOX = 44;
-  const ICON_SC  = (22 / 24).toFixed(4);
-  const ICON_OFF = (ICON_BOX - 22) / 2;
-  const labY = ICO_TOP + 16 + Math.round(14 * 0.82);
-  const subY = labY + 14 + 3 + Math.round(13 * 0.82);
-
-  const cardsSvg = !showCards ? '' : ICO_XS.map((cx, i) => {
-    const kp   = KP[i];
-    const boxX = cx + 18;
-    const boxY = ICO_TOP + 16;
-    const txtX = boxX + ICON_BOX + 14;
-    return `
-  <rect x="${cx}" y="${ICO_TOP}" width="${ICO_W}" height="${ICO_H}" rx="14"
-        fill="rgba(138,92,246,0.08)" stroke="rgba(138,92,246,0.25)" stroke-width="1"/>
-  <rect x="${boxX}" y="${boxY}" width="${ICON_BOX}" height="${ICON_BOX}" rx="10" fill="url(#purpGrad)"/>
-  <g transform="translate(${boxX + ICON_OFF},${boxY + ICON_OFF}) scale(${ICON_SC})">
-    <path d="${getIconPath(kp.icon)}" fill="white"/>
-  </g>
-  <text x="${txtX}" y="${labY}" font-family="${FP}" font-size="14" font-weight="700"
-        fill="white" letter-spacing="0.3">${esc(String(kp.title || '').toUpperCase().slice(0, 20))}</text>
-  <text x="${txtX}" y="${subY}" font-family="${FI}" font-size="13" fill="#B4B0C5"
-  >${esc(String(kp.desc || '').slice(0, 38))}</text>`;
-  }).join('');
-
-  // Text-zone gradient height is DYNAMIC — sized to whatever content is
-  // actually there (computed above via cascade), not a fixed hero split.
-  // Starts fading in well above the headline so the transition is gradual,
-  // not a hard line, and only darkens the lower portion of the photo —
-  // the top ~50% stays completely natural, uncovered.
-  const GRAD_TOP = Math.max(HERO_H - 40, HL_TOP - 90);
+  const FT_RULE_Y = H - 72 - 26;
+  const HL_TOP = 712, HL_BOX_H = FT_RULE_Y - 40 - HL_TOP;
+  const { fs: HL_FS, lines: hlLines, lh: HL_LH } = fitHeadlineBox(headline, AVAIL_ED, HL_BOX_H, 82, 0.78, 1.02, 4);
 
   return Buffer.from(`<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
-<defs>${defsBlock(PAD_X, W)}
-  <!-- Legibility gradient — dynamically sized to the text zone only.
-       This is NOT a color tint: stops are pure black at varying alpha,
-       so hue/saturation of the photo underneath is fully preserved. -->
-  <linearGradient id="textGrad" gradientUnits="userSpaceOnUse"
-                  x1="0" y1="${GRAD_TOP}" x2="0" y2="${FT_Y}">
-    <stop offset="0%"   stop-color="#000000" stop-opacity="0"/>
-    <stop offset="45%"  stop-color="#000000" stop-opacity="0.55"/>
-    <stop offset="100%" stop-color="#000000" stop-opacity="0.86"/>
-  </linearGradient>
-  <!-- Subtle top scrim — just enough for the wordmark to read against a
-       bright sky or busy detail, not a recolor of the image. -->
-  <linearGradient id="topScrim" gradientUnits="userSpaceOnUse"
-                  x1="0" y1="0" x2="0" y2="170">
-    <stop offset="0%"   stop-color="#000000" stop-opacity="0.4"/>
+<defs>${defsBlock(MARGIN, W)}
+  <linearGradient id="topScrim" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="200">
+    <stop offset="0%" stop-color="#000000" stop-opacity="0.45"/>
     <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
   </linearGradient>
-  <!-- Edge vignette — subtle darkening only at the outer edges/corners,
-       center stays fully clear and sharp. Pure black, no hue shift. -->
-  <radialGradient id="edgeVignette" cx="50%" cy="42%" r="75%" gradientUnits="objectBoundingBox">
-    <stop offset="62%"  stop-color="#000000" stop-opacity="0"/>
-    <stop offset="100%" stop-color="#000000" stop-opacity="0.38"/>
-  </radialGradient>
 </defs>
+<!-- Photo (composited below) fills the full canvas but only its top
+     ${PHOTO_H}px is meant to show — the paper panel below covers the rest.
+     Photo itself is never tinted; only this top scrim aids the lockup. -->
+<rect x="0" y="0" width="${W}" height="200" fill="url(#topScrim)"/>
+<rect x="0" y="${PHOTO_H}" width="${W}" height="${H - PHOTO_H}" fill="${PAPER}"/>
 
-<!-- Photo (composited below this SVG layer) runs the FULL 1080×1080
-     canvas — natural colors, no purple/blue tint, no hard hero/content
-     split. Only these three grayscale-alpha layers touch it. -->
-<rect x="0" y="0" width="${W}" height="${H}" fill="url(#edgeVignette)"/>
-<rect x="0" y="0" width="${W}" height="170" fill="url(#topScrim)"/>
-<rect x="0" y="${GRAD_TOP}" width="${W}" height="${FT_Y - GRAD_TOP}" fill="url(#textGrad)"/>
-<rect x="0" y="${FT_Y}" width="${W}" height="${H - FT_Y}" fill="#0B0B0F"/>
+${lockupSvg(MARGIN, 64, logoUri)}
 
-${logoMarkSvg(36, 36, 52, logoUri, 14)}
-<text x="102" y="60" font-family="${FP}" font-size="21" font-weight="700" fill="white">Novas Beat</text>
-<text x="102" y="79" font-family="${FI}" font-size="12" font-style="italic" fill="#38E0D2">The world, unfiltered.</text>
+<rect x="${MARGIN}" y="566" width="${catW}" height="40" rx="4" fill="${ACCENT}"/>
+<text x="${MARGIN + catW / 2}" y="592" font-family="${FM}" font-size="18" font-weight="700" fill="white"
+      text-anchor="middle" letter-spacing="2.5">${cat}</text>
 
-<rect x="36" y="102" width="${catW}" height="${catH}" rx="9" fill="url(#purpGrad)"/>
-<text x="${36 + catW / 2}" y="125" font-family="${FP}" font-size="16" font-weight="700" fill="white"
-      text-anchor="middle" letter-spacing="0.6">${cat}</text>
+${hlLines.map((l, i) => `<text x="${MARGIN}" y="${HL_TOP + Math.round(HL_FS * 0.85) + i * HL_LH}"
+      font-family="${FP}" font-size="${HL_FS}" font-weight="800" fill="${INK}"
+      letter-spacing="${(-HL_FS * 0.02).toFixed(1)}">${esc(l)}</text>`).join('\n')}
 
-${isBreaking ? `<rect x="${W - 36 - 175}" y="36" width="175" height="34" rx="17" fill="url(#purpGrad)"/>
-<circle cx="${W - 36 - 175 + 18}" cy="53" r="4" fill="white"/>
-<text x="${W - 36 - 175 + 30}" y="57" font-family="${FP}" font-size="14" font-weight="700" fill="white"
-      letter-spacing="0.5">BREAKING NEWS</text>` : ''}
+${footerSvg(MARGIN, W - MARGIN, FT_RULE_Y, `SOURCE — ${(source || 'NOVAS BEAT').toUpperCase()}`, `NOVASBEAT.COM · ${todayLabel()}`, false)}
 
-${renderHeadlineTiers(hlTiers, HL_CX, 'middle', HL_TOP).markup}
+${debug ? debugOverlay(W, H, MARGIN, HL_TOP, FT_RULE_Y) : ''}
+</svg>`);
+}
 
-${descLinesUsed.length ? `<rect x="${PAD_X}" y="${DESC_TOP}" width="3"
-      height="${DESC_LH * descLinesUsed.length + 4}" rx="1.5" fill="#8A5CF6"/>
-${descLinesUsed.map((dl, i) =>
-  `<text x="${PAD_X + 18}" y="${DESC_Y1 + i * DESC_LH}"
-      font-family="${FI}" font-size="${DESC_FS}" fill="#D8D6E3">${esc(dl)}</text>`
-).join('\n')}` : ''}
+// ── B. CINEMATIC — full-bleed photo, bottom-aligned right-inset headline ─
+function buildCinematicSvg({ line1, line2, description, category, source, isBreaking, debug, logoUri, scrimColor }) {
+  const headline = [line1, line2].filter(Boolean).join(' ');
+  const cat = esc(String(category || 'News').toUpperCase());
+  const RIGHT_INSET = 120;
+  const boxTop = 606, boxBot = H - 190;
+  const AVAIL_ED = W - MARGIN - RIGHT_INSET;
+  const { fs: HL_FS, lines: hlLines, lh: HL_LH } = fitHeadlineBox(headline, AVAIL_ED, boxBot - boxTop, 106, 0.72, 0.98, 4);
+  // Bottom-aligned: stack lines upward from the box's bottom edge.
+  const blockH = hlLines.length * HL_LH;
+  const startY = boxBot - blockH;
 
-${cardsSvg}
+  const sc = scrimColor || { r: 8, g: 8, b: 10 };
+  const scrimHex = `rgb(${sc.r},${sc.g},${sc.b})`;
 
-<line x1="${PAD_X}" y1="${META_Y}" x2="${W - PAD_X}" y2="${META_Y}" stroke="rgba(255,255,255,0.1)" stroke-width="1"/>
-<text x="${PAD_X}" y="${BTN_CY + 5}" font-family="${FI}" font-size="14" fill="#C9C6D8"
->Source: <tspan font-weight="600" fill="white">Novas Beat News Desk</tspan></text>
+  return Buffer.from(`<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
+<defs>${defsBlock(MARGIN, W)}
+  <linearGradient id="bottomScrim" gradientUnits="userSpaceOnUse" x1="0" y1="${H - 620}" x2="0" y2="${H}">
+    <stop offset="0%" stop-color="${scrimHex}" stop-opacity="0"/>
+    <stop offset="38%" stop-color="${scrimHex}" stop-opacity="0.55"/>
+    <stop offset="65%" stop-color="${scrimHex}" stop-opacity="0.82"/>
+    <stop offset="100%" stop-color="${scrimHex}" stop-opacity="0.93"/>
+  </linearGradient>
+  <linearGradient id="topScrim" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="220">
+    <stop offset="0%" stop-color="#000000" stop-opacity="0.5"/>
+    <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+  </linearGradient>
+</defs>
+<rect x="0" y="0" width="${W}" height="220" fill="url(#topScrim)"/>
+<rect x="0" y="${H - 620}" width="${W}" height="620" fill="url(#bottomScrim)"/>
 
-<rect x="${BTN_X}" y="${BTN_Y}" width="${BTN_W}" height="${BTN_H}" rx="${BTN_H / 2}" fill="url(#purpGrad)"/>
-<text x="${BTN_X + BTN_W / 2 - 14}" y="${BTN_CY + 5}" font-family="${FP}" font-size="14.5" font-weight="600" fill="white"
-      text-anchor="middle">For more news, visit novasbeat.com</text>
-<g transform="translate(${BTN_X + BTN_W - 30},${BTN_CY - 8}) scale(${(16 / 24).toFixed(4)})">
-  <path d="${ARROW_PATH}" fill="white"/>
-</g>
+${lockupSvg(MARGIN, 64, logoUri)}
 
-<rect x="0" y="${FT_Y}" width="${W}" height="${FT_H}" fill="url(#ftGrad)"/>
-${logoMarkSvg(PAD_X, FT_CY - 21, 42, logoUri, 12)}
-<text x="${PAD_X + 54}" y="${FT_CY - 2}" font-family="${FP}" font-size="17" font-weight="700" fill="white">novasbeat.com</text>
-<text x="${PAD_X + 54}" y="${FT_CY + 17}" font-family="${FI}" font-size="12.5" fill="rgba(255,255,255,0.8)"
->AI-powered · Verified across hundreds of sources</text>
+<!-- Category sits relative to the headline's ACTUAL start (startY), not
+     a fixed box-top offset — guarantees it always lands inside the
+     scrim's well-darkened zone regardless of how many lines the
+     headline wrapped to, instead of sometimes landing on bare photo. -->
+<text x="${W - RIGHT_INSET}" y="${startY - 34}" font-family="${FM}" font-size="20" font-weight="700" fill="${ACCENT_TEXT}"
+      text-anchor="end" letter-spacing="3">${cat}</text>
+<line x1="${W - RIGHT_INSET - 120}" y1="${startY - 44}" x2="${W - RIGHT_INSET}" y2="${startY - 44}" stroke="${ACCENT_TEXT}" stroke-width="1"/>
 
-${debug ? debugOverlay(W, H, PAD_X, HL_TOP - 24, FT_Y) : ''}
+${hlLines.map((l, i) => `<text x="${W - RIGHT_INSET}" y="${startY + Math.round(HL_FS * 0.85) + i * HL_LH}"
+      font-family="${FP}" font-size="${HL_FS}" font-weight="800" fill="white" text-anchor="end"
+      letter-spacing="${(-HL_FS * 0.02).toFixed(1)}">${esc(l)}</text>`).join('\n')}
+
+${footerSvg(MARGIN, W - MARGIN, H - 72 - 26, `SOURCE — ${(source || 'NOVAS BEAT').toUpperCase()}`, `NOVASBEAT.COM · ${todayLabel()}`, true)}
+
+${debug ? debugOverlay(W, H, MARGIN, boxTop, boxBot) : ''}
+</svg>`);
+}
+
+// ── D. BREAKING — purple top bar, huge bottom-aligned headline ──────
+function buildBreakingSvg({ line1, line2, description, category, source, debug, logoUri, scrimColor }) {
+  const headline = [line1, line2].filter(Boolean).join(' ');
+  const BAR_H = 76;
+  const boxTop = 520, boxBot = H - 190;
+  const AVAIL_ED = W - MARGIN * 2;
+  const { fs: HL_FS, lines: hlLines, lh: HL_LH } = fitHeadlineBox(headline, AVAIL_ED, boxBot - boxTop, 118, 0.72, 0.94, 4);
+  const blockH = hlLines.length * HL_LH;
+  const startY = boxBot - blockH;
+
+  const sc = scrimColor || { r: 8, g: 8, b: 10 };
+  const scrimHex = `rgb(${sc.r},${sc.g},${sc.b})`;
+  const time = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+
+  return Buffer.from(`<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
+<defs>${defsBlock(MARGIN, W)}
+  <linearGradient id="bottomScrim" gradientUnits="userSpaceOnUse" x1="0" y1="${H - 620}" x2="0" y2="${H}">
+    <stop offset="0%" stop-color="${scrimHex}" stop-opacity="0"/>
+    <stop offset="38%" stop-color="${scrimHex}" stop-opacity="0.58"/>
+    <stop offset="65%" stop-color="${scrimHex}" stop-opacity="0.84"/>
+    <stop offset="100%" stop-color="${scrimHex}" stop-opacity="0.94"/>
+  </linearGradient>
+</defs>
+<rect x="0" y="${H - 620}" width="${W}" height="620" fill="url(#bottomScrim)"/>
+
+<rect x="0" y="0" width="${W}" height="${BAR_H}" fill="${ACCENT}"/>
+<text x="${MARGIN}" y="${BAR_H / 2 + 8}" font-family="${FM}" font-size="24" font-weight="700" fill="white"
+      letter-spacing="4">BREAKING</text>
+<text x="${W - MARGIN}" y="${BAR_H / 2 + 8}" font-family="${FM}" font-size="18" fill="white"
+      text-anchor="end" letter-spacing="1.5">${time} CET</text>
+
+${lockupSvg(MARGIN, 140, logoUri)}
+
+${hlLines.map((l, i) => `<text x="${MARGIN}" y="${startY + Math.round(HL_FS * 0.85) + i * HL_LH}"
+      font-family="${FP}" font-size="${HL_FS}" font-weight="900" fill="white"
+      letter-spacing="${(-HL_FS * 0.025).toFixed(1)}">${esc(l)}</text>`).join('\n')}
+
+${footerSvg(MARGIN, W - MARGIN, H - 72 - 26, 'LIVE — NOVASBEAT.COM', `NOVASBEAT.COM · ${todayLabel()}`, true)}
+
+${debug ? debugOverlay(W, H, MARGIN, boxTop, boxBot) : ''}
 </svg>`);
 }
 
@@ -570,27 +605,54 @@ function resolveHeadlineLines(headline) {
   return { line1: words.slice(0, mid).join(' '), line2: words.slice(mid).join(' ') };
 }
 
+// Deterministic variant pick — same article always renders the same way
+// (no flicker on retries), but different articles land on different
+// compositions so the Instagram grid doesn't repeat one layout either.
+// isBreaking always wins (dedicated treatment); opts.variant overrides
+// explicitly for testing/preview.
+function pickVariant(headlineText, isBreaking, explicit) {
+  if (explicit) return explicit;
+  if (isBreaking) return 'breaking';
+  let h = 0;
+  for (const ch of String(headlineText || '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return (h % 2 === 0) ? 'standard' : 'cinematic';
+}
+
 // ── Public API — Instagram (1080×1080, primary format) ─────────────
 // headline: string OR { line1, line2 }. opts.isBreaking selects the
-// dedicated Breaking News treatment. opts.debug overlays safe-area
+// dedicated Breaking News treatment. opts.variant forces a specific
+// composition ('standard'|'cinematic'|'breaking'). opts.source names
+// the wire/outlet for the footer credit. opts.debug overlays safe-area
 // guides (never use in production output).
 export async function buildBrandedImage(imageUrl, headline, category, opts = {}) {
-  const { body = '', summary, keyPoints, isBreaking = false, debug = false } = opts;
+  const { body = '', summary, isBreaking = false, debug = false, variant, source } = opts;
   const { line1, line2 } = resolveHeadlineLines(headline);
   const description = summary || makeSummary(body, 160);
 
-  // Full-bleed photo — natural colors preserved across the WHOLE canvas,
-  // not just a 560px top strip. This is the actual fix for "every post
-  // looks the same purple thing": the photo's own colors now drive the
-  // post's visual identity; only alpha-only vignette/gradient layers
-  // touch it (see buildSvg), never a hue/color tint.
+  // Full-bleed photo — natural colors preserved across the WHOLE canvas.
+  // This is the actual fix for "every post looks the same purple thing":
+  // the photo's own colors now drive the post's visual identity; only
+  // alpha-only or photo-sampled-tint layers ever touch it, never a fixed
+  // purple/blue wash.
   const [photo, logoUri] = await Promise.all([
     downloadHero(imageUrl, W, H, { r: 68, g: 58, b: 122 }),
     getLogoDataUri(),
   ]);
+
+  const which = pickVariant([line1, line2].join(' '), isBreaking, variant);
+  const args = { line1, line2, description, category, source, isBreaking, debug, logoUri };
+  let svgBuf;
+  if (which === 'standard') {
+    svgBuf = buildStandardSvg(args);
+  } else {
+    // Cinematic + Breaking both use a bottom scrim tinted from the
+    // photo's own dominant colour rather than a fixed purple/black.
+    args.scrimColor = await dominantColor(photo);
+    svgBuf = which === 'breaking' ? buildBreakingSvg(args) : buildCinematicSvg(args);
+  }
+
   const bg = await sharp({ create: { width: W, height: H, channels: 3, background: { r: 11, g: 11, b: 15 } } })
     .png().toBuffer();
-  const svgBuf = buildSvg({ line1, line2, description, category, keyPoints, isBreaking, debug, logoUri });
 
   const out = await sharp(bg)
     .composite([{ input: photo, top: 0, left: 0 }, { input: svgBuf, top: 0, left: 0 }])
