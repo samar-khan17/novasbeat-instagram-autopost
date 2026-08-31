@@ -62,7 +62,7 @@ export async function runPipeline(articleId, override = {}) {
         article.image_url,
         headlineSplit || article.headline,
         article.category,
-        { body, summary, keyPoints },
+        { body, summary, keyPoints, publishedAt: article.published_at || article.scraped_at },
       );
     } else if (imageMode === 'recreate') {
       const b64 = await nvidia.recreateImage(article.headline);

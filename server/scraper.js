@@ -52,6 +52,7 @@ async function insertNew(rows) {
     image_url: r.image_url || '',
     source_url: r.source_url,
     category: r.category || null,
+    published_at: r.published_at || null,
     status: 'pending',
   }));
 
@@ -84,6 +85,7 @@ async function importFromDatabase() {
       body: (a.body || a.excerpt || '').trim(),
       image_url: a.image_url,
       category: a.category || null,
+      published_at: a.created_at || null, // the site's own publish timestamp
       // Stable unique key + a real, working link on the site.
       source_url: `${origin}/article.html?id=${a.id}`,
     }));

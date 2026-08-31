@@ -317,61 +317,136 @@ function debugOverlay(w, h, padX, safeTop, safeBot) {
 // follow-ons using the same building blocks below if wanted later.)
 // ═══════════════════════════════════════════════════════════════════
 
+// Real site categories (from nb-cron-publisher.php's nbcp_detect_category
+// / nb_valid_categories — NOT guessed) each with their own accent colour.
+// Unknown/missing category falls back to brand purple.
+const CATEGORY_COLORS = {
+  politics:   '#B3261E', // red
+  world:      '#1F5FBF', // blue
+  pakistan:   '#0F7A3D', // green
+  technology: '#3730A3', // indigo
+  health:     '#0E8C7F', // teal
+  business:   '#B36B00', // amber
+  science:    '#5B2FBF', // violet
+  sports:     '#C2410C', // burnt orange
+  inspiring:  '#B0177E', // magenta
+};
+function categoryColor(category) {
+  return CATEGORY_COLORS[String(category || '').trim().toLowerCase()] || ACCENT;
+}
+
 // Lockup: NB mark + wordmark + tagline. Always sits on photography in
 // all three compositions (even Standard, where it's positioned in the
-// photo's top region above the paper panel), so it always uses the
-// on-dark styling — never the on-paper ink variant.
+// photo's top region above the panel), so it always uses the on-dark
+// styling. Sized up from the original spec per direct feedback.
 function lockupSvg(x, y, logoUri) {
-  return `${logoMarkSvg(x, y, 58, logoUri, 16)}
-<text x="${x + 74}" y="${y + 27}" font-family="${FP}" font-size="27" font-weight="800" fill="white"
+  return `${logoMarkSvg(x, y, 70, logoUri, 18)}
+<text x="${x + 86}" y="${y + 32}" font-family="${FP}" font-size="32" font-weight="800" fill="white"
       letter-spacing="2.5">NOVAS BEAT</text>
-<text x="${x + 74}" y="${y + 47}" font-family="${FM}" font-size="16" fill="${ACCENT_LIGHT}"
+<text x="${x + 86}" y="${y + 55}" font-family="${FM}" font-size="18" fill="${ACCENT_LIGHT}"
       letter-spacing="1.2">THE WORLD, UNFILTERED</text>`;
 }
 
-// Footer: hairline rule + a space-between mono row. Minimal — no
-// purple bar. `onPhoto` switches ink vs. white/meta colouring so it
-// reads correctly whether it lands on the paper panel or on photography.
-function footerSvg(x1, x2, y, leftText, rightText, onPhoto) {
-  const ruleColor = onPhoto ? RULE_ON_PHOTO : '#CFCAC2';
-  const textColor = onPhoto ? META_ON_PHOTO : INK_60;
+// Footer: hairline rule + a single right-aligned mono line. No source
+// credit — Novas Beat is its own source, per direct feedback — just the
+// site + the article's real publish date (never render time).
+function footerSvg(x1, x2, y, rightText, onPhoto) {
+  const ruleColor = onPhoto ? RULE_ON_PHOTO : 'rgba(255,255,255,.28)';
+  const textColor = onPhoto ? META_ON_PHOTO : 'rgba(255,255,255,.75)';
   return `<line x1="${x1}" y1="${y}" x2="${x2}" y2="${y}" stroke="${ruleColor}" stroke-width="1"/>
-<text x="${x1}" y="${y + 30}" font-family="${FM}" font-size="18" fill="${textColor}" letter-spacing="1.4">${esc(leftText)}</text>
 <text x="${x2}" y="${y + 30}" font-family="${FM}" font-size="18" fill="${textColor}" letter-spacing="1.4" text-anchor="end">${esc(rightText)}</text>`;
 }
 
-function todayLabel() {
-  return new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).toUpperCase();
+// Formats the ARTICLE'S real publish date — never the render/today date.
+// opts.publishedAt is a timestamp from the source article; only falls
+// back to today if that's genuinely missing (e.g. old rows from before
+// this field existed).
+function publishDateLabel(publishedAt) {
+  const d = publishedAt ? new Date(publishedAt) : new Date();
+  const valid = !isNaN(d.getTime());
+  return (valid ? d : new Date())
+    .toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).toUpperCase();
 }
 
-// ── A. STANDARD EDITORIAL — photo top 648, paper panel below ────────
-function buildStandardSvg({ line1, line2, description, category, source, isBreaking, debug, logoUri }) {
-  const headline = [line1, line2].filter(Boolean).join(' ');
+// ── Two-part headline: line1 (context, regular size) + line2 (the key
+// point/impact, rendered noticeably BIGGER) — capped to maxTotalLines
+// combined. Real per-char measurement at each size, real word-wrap, a
+// genuine fit search from maxFs down to a floor before ever trimming.
+function fitTwoPartHeadline(line1, line2, avail, boxH, maxFs = 100, floorRatio = 0.5, emphasisMul = 1.22, maxTotalLines = 3) {
+  const ctx = String(line1 || '').trim();
+  const emp = String(line2 || '').trim();
+  const minFs = Math.max(24, Math.round(maxFs * floorRatio));
+
+  // Phase 1: aesthetic range (maxFs down to the requested floorRatio) —
+  // this is what actually renders for realistic headline lengths.
+  // Phase 2: if that genuinely can't fit, keep shrinking past the
+  // aesthetic floor down to a hard minimum (24px) before ever trimming
+  // content — a real safety net, not a stylistic choice.
+  const hardMinFs = 24;
+  for (let fs = maxFs; fs >= hardMinFs; fs -= 2) {
+    const empFs = Math.round(fs * emphasisMul);
+    const ctxLines = ctx ? wrapByWidth(ctx, fs, avail) : [];
+    const empLines = emp ? wrapByWidth(emp, empFs, avail) : [];
+    const ctxLH = Math.round(fs * 1.02), empLH = Math.round(empFs * 0.98);
+    const totalLines = ctxLines.length + empLines.length;
+    const totalH = ctxLines.length * ctxLH + empLines.length * empLH;
+    if (totalLines > 0 && totalLines <= maxTotalLines && totalH <= boxH) {
+      return { ctxLines, empLines, fs, empFs, ctxLH, empLH, totalH };
+    }
+  }
+  // Genuine last resort (essentially never reached given production
+  // headlines are 5-9 words by design) — protect the emphasis phrase
+  // (the actual news point) fully, and truncate the context line with
+  // a real ellipsis via wrapText's own word-level truncation, instead
+  // of silently popping whole wrapped lines and losing real words with
+  // no indication.
+  const fs = hardMinFs, empFs = Math.round(fs * emphasisMul);
+  const ctxLH = Math.round(fs * 1.02), empLH = Math.round(empFs * 0.98);
+  let empLines = emp ? wrapByWidth(emp, empFs, avail).slice(0, maxTotalLines) : [];
+  const remaining = Math.max(0, maxTotalLines - empLines.length);
+  const approxCharsPerLine = Math.max(6, Math.floor(avail / (0.62 * fs)));
+  const ctxLines = remaining > 0 && ctx ? wrapText(ctx, approxCharsPerLine, remaining) : [];
+  return { ctxLines, empLines, fs, empFs, ctxLH, empLH, totalH: ctxLines.length * ctxLH + empLines.length * empLH };
+}
+
+function renderTwoPartHeadline(fit, x, startY, ctxColor, empColor) {
+  let y = startY, markup = '';
+  for (const l of fit.ctxLines) {
+    y += fit.ctxLH;
+    markup += `<text x="${x}" y="${y - Math.round(fit.ctxLH - fit.fs * 0.85)}" font-family="${FP}" font-size="${fit.fs}"
+      font-weight="800" fill="${ctxColor}" letter-spacing="${(-fit.fs * 0.02).toFixed(1)}">${esc(l)}</text>\n`;
+  }
+  for (const l of fit.empLines) {
+    y += fit.empLH;
+    markup += `<text x="${x}" y="${y - Math.round(fit.empLH - fit.empFs * 0.85)}" font-family="${FP}" font-size="${fit.empFs}"
+      font-weight="900" fill="${empColor}" letter-spacing="${(-fit.empFs * 0.02).toFixed(1)}">${esc(l)}</text>\n`;
+  }
+  return markup;
+}
+
+// ── A. STANDARD EDITORIAL — photo top 648, colour panel below ───────
+// Panel colour is per-category (not fixed paper/purple) — each real site
+// category gets its own accent so the grid reads politics vs. sports vs.
+// tech at a glance, not just by the tiny category label.
+function buildStandardSvg({ line1, line2, category, publishedAt, debug, logoUri }) {
   const PHOTO_H = 648;
   const AVAIL_ED = W - MARGIN * 2;
+  const panelColor = categoryColor(category);
 
   const cat = esc(String(category || 'News').toUpperCase());
-  const catW = Math.max(90, cat.length * 11 + 40);
+  const catW = Math.max(100, cat.length * 13 + 48);
 
-  // Footer hugs the ACTUAL headline content (headlineBottom + a small
-  // fixed gap) instead of sitting at a fixed distance from the bottom —
-  // that fixed-position approach left a large dead gap under short
-  // headlines. The box height passed to the fitter still reserves the
-  // worst-case footer room, so a long headline can never push the
-  // footer off-canvas.
-  // The box passed to the fitter reserves real room down to a fixed
-  // 90px footer minimum (2 lines of mono footer text) — NOT a tight
-  // budget matched to the "ideal" 106px size. A long headline with an
-  // unbreakable long word (e.g. "reforestation") can still need more
-  // than 106px×4-lines worth of room; the floor ratio here (0.42) is
-  // real headroom, not a stylistic choice, so the fitter can always
-  // reach a size that truly fits before ever falling back to
-  // truncation. Footer then hugs whatever height the headline actually
-  // used, by construction never overflowing.
-  const FOOTER_GAP = 48, FOOTER_RESERVE = 90;
-  const HL_TOP = 712, HL_BOX_H = H - FOOTER_RESERVE - FOOTER_GAP - HL_TOP;
-  const { fs: HL_FS, lines: hlLines, lh: HL_LH } = fitHeadlineBox(headline, AVAIL_ED, HL_BOX_H, 106, 0.42, 0.98, 8);
-  const FT_RULE_Y = HL_TOP + hlLines.length * HL_LH + FOOTER_GAP;
+  // Footer is FIXED at the bottom — it never moves regardless of
+  // headline length. Balance for short headlines comes from vertically
+  // centering the headline block in the space above it instead.
+  const FT_RULE_Y = H - 90;
+  const HL_TOP = 726, HL_BOTTOM_LIMIT = FT_RULE_Y - 50;
+  const HL_BOX_H = HL_BOTTOM_LIMIT - HL_TOP;
+
+  // Two-part headline: line1 (context) regular, line2 (the actual news
+  // point) rendered bigger — capped at 3 lines total, real fit search.
+  const fit = fitTwoPartHeadline(line1, line2, AVAIL_ED, HL_BOX_H, 108, 0.5, 1.22, 3);
+  const startY = HL_TOP + Math.max(0, Math.round((HL_BOX_H - fit.totalH) / 2));
 
   return Buffer.from(`<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
 <defs>${defsBlock(MARGIN, W)}
@@ -381,29 +456,28 @@ function buildStandardSvg({ line1, line2, description, category, source, isBreak
   </linearGradient>
 </defs>
 <!-- Photo (composited below) fills the full canvas but only its top
-     ${PHOTO_H}px is meant to show — the paper panel below covers the rest.
-     Photo itself is never tinted; only this top scrim aids the lockup. -->
+     ${PHOTO_H}px is meant to show — the colour panel below covers the
+     rest. Photo itself is never tinted; only this top scrim aids the
+     lockup's legibility. -->
 <rect x="0" y="0" width="${W}" height="200" fill="url(#topScrim)"/>
-<rect x="0" y="${PHOTO_H}" width="${W}" height="${H - PHOTO_H}" fill="${PAPER}"/>
+<rect x="0" y="${PHOTO_H}" width="${W}" height="${H - PHOTO_H}" fill="${panelColor}"/>
 
 ${lockupSvg(MARGIN, 64, logoUri)}
 
-<rect x="${MARGIN}" y="566" width="${catW}" height="40" rx="4" fill="${ACCENT}"/>
-<text x="${MARGIN + catW / 2}" y="592" font-family="${FM}" font-size="18" font-weight="700" fill="white"
-      text-anchor="middle" letter-spacing="2.5">${cat}</text>
+<rect x="${MARGIN}" y="562" width="${catW}" height="46" rx="4" fill="${panelColor}"/>
+<text x="${MARGIN + catW / 2}" y="592" font-family="${FM}" font-size="22" font-weight="700" fill="white"
+      text-anchor="middle" letter-spacing="2.8">${cat}</text>
 
-${hlLines.map((l, i) => `<text x="${MARGIN}" y="${HL_TOP + Math.round(HL_FS * 0.85) + i * HL_LH}"
-      font-family="${FP}" font-size="${HL_FS}" font-weight="800" fill="${INK}"
-      letter-spacing="${(-HL_FS * 0.02).toFixed(1)}">${esc(l)}</text>`).join('\n')}
+${renderTwoPartHeadline(fit, MARGIN, startY, 'rgba(255,255,255,.88)', 'white')}
 
-${footerSvg(MARGIN, W - MARGIN, FT_RULE_Y, `SOURCE — ${(source || 'NOVAS BEAT').toUpperCase()}`, `NOVASBEAT.COM · ${todayLabel()}`, false)}
+${footerSvg(MARGIN, W - MARGIN, FT_RULE_Y, `NOVASBEAT.COM · ${publishDateLabel(publishedAt)}`, true)}
 
 ${debug ? debugOverlay(W, H, MARGIN, HL_TOP, FT_RULE_Y) : ''}
 </svg>`);
 }
 
 // ── B. CINEMATIC — full-bleed photo, bottom-aligned right-inset headline ─
-function buildCinematicSvg({ line1, line2, description, category, source, isBreaking, debug, logoUri, scrimColor }) {
+function buildCinematicSvg({ line1, line2, description, category, publishedAt, isBreaking, debug, logoUri, scrimColor }) {
   const headline = [line1, line2].filter(Boolean).join(' ');
   const cat = esc(String(category || 'News').toUpperCase());
   const RIGHT_INSET = 120;
@@ -447,14 +521,14 @@ ${hlLines.map((l, i) => `<text x="${W - RIGHT_INSET}" y="${startY + Math.round(H
       font-family="${FP}" font-size="${HL_FS}" font-weight="800" fill="white" text-anchor="end"
       letter-spacing="${(-HL_FS * 0.02).toFixed(1)}">${esc(l)}</text>`).join('\n')}
 
-${footerSvg(MARGIN, W - MARGIN, H - 72 - 26, `SOURCE — ${(source || 'NOVAS BEAT').toUpperCase()}`, `NOVASBEAT.COM · ${todayLabel()}`, true)}
+${footerSvg(MARGIN, W - MARGIN, H - 72 - 26, `NOVASBEAT.COM · ${publishDateLabel(publishedAt)}`, true)}
 
 ${debug ? debugOverlay(W, H, MARGIN, boxTop, boxBot) : ''}
 </svg>`);
 }
 
 // ── D. BREAKING — purple top bar, huge bottom-aligned headline ──────
-function buildBreakingSvg({ line1, line2, description, category, source, debug, logoUri, scrimColor }) {
+function buildBreakingSvg({ line1, line2, description, category, publishedAt, debug, logoUri, scrimColor }) {
   const headline = [line1, line2].filter(Boolean).join(' ');
   const BAR_H = 76;
   const boxTop = 520, boxBot = H - 190;
@@ -490,7 +564,7 @@ ${hlLines.map((l, i) => `<text x="${MARGIN}" y="${startY + Math.round(HL_FS * 0.
       font-family="${FP}" font-size="${HL_FS}" font-weight="900" fill="white"
       letter-spacing="${(-HL_FS * 0.025).toFixed(1)}">${esc(l)}</text>`).join('\n')}
 
-${footerSvg(MARGIN, W - MARGIN, H - 72 - 26, 'LIVE — NOVASBEAT.COM', `NOVASBEAT.COM · ${todayLabel()}`, true)}
+${footerSvg(MARGIN, W - MARGIN, H - 72 - 26, `NOVASBEAT.COM · ${publishDateLabel(publishedAt)}`, true)}
 
 ${debug ? debugOverlay(W, H, MARGIN, boxTop, boxBot) : ''}
 </svg>`);
@@ -641,7 +715,7 @@ function pickVariant(headlineText, isBreaking, explicit) {
 // the wire/outlet for the footer credit. opts.debug overlays safe-area
 // guides (never use in production output).
 export async function buildBrandedImage(imageUrl, headline, category, opts = {}) {
-  const { body = '', summary, isBreaking = false, debug = false, variant, source } = opts;
+  const { body = '', summary, isBreaking = false, debug = false, variant, publishedAt } = opts;
   const { line1, line2 } = resolveHeadlineLines(headline);
   const description = summary || makeSummary(body, 160);
 
@@ -656,7 +730,7 @@ export async function buildBrandedImage(imageUrl, headline, category, opts = {})
   ]);
 
   const which = pickVariant([line1, line2].join(' '), isBreaking, variant);
-  const args = { line1, line2, description, category, source, isBreaking, debug, logoUri };
+  const args = { line1, line2, description, category, publishedAt, isBreaking, debug, logoUri };
   let svgBuf;
   if (which === 'standard') {
     svgBuf = buildStandardSvg(args);
