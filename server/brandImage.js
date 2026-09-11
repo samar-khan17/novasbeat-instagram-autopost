@@ -18,6 +18,7 @@ const H      = 1080;
 const HERO_H = 560;
 const PAD_X  = 40;
 const AVAIL  = W - PAD_X * 2;  // 1000px usable text width
+const PHOTO_H = 648; // Standard layout's visible photo strip (rest is the colour panel)
 
 // ── Canvas dimensions — Facebook (landscape, link/photo post) ─────
 const FB_W      = 1200;
@@ -429,7 +430,6 @@ function renderTwoPartHeadline(fit, x, startY, ctxColor, empColor) {
 // category gets its own accent so the grid reads politics vs. sports vs.
 // tech at a glance, not just by the tiny category label.
 function buildStandardSvg({ line1, line2, category, publishedAt, debug, logoUri }) {
-  const PHOTO_H = 648;
   const AVAIL_ED = W - MARGIN * 2;
   const panelColor = categoryColor(category);
 
@@ -675,14 +675,37 @@ async function applyEdgeBlur(photoBuf, w, h, sigma = 16) {
 }
 
 // ── Shared photo download + hero fit ───────────────────────────────
-async function downloadHero(imageUrl, w, h, fallbackColor) {
+// fitMode 'cover' (default, unchanged) crops the source to fill w×h —
+// matches Instagram's own "Fill" option, always loses some edge content.
+// fitMode 'contain' matches Instagram's own "Fit" option instead: the
+// WHOLE source photo is shown, nothing cropped, scaled down to fit
+// inside w×h. Any leftover space isn't left as flat black bars — it's
+// filled with a blurred, darkened cover-crop of the same photo (a
+// backdrop), so there's no dead space, then the real uncropped photo is
+// centered on top.
+async function downloadHero(imageUrl, w, h, fallbackColor, fitMode = 'cover') {
   if (imageUrl) {
     try {
       const dl = await axios.get(imageUrl, {
         responseType: 'arraybuffer', timeout: 25000,
         headers: { 'User-Agent': 'Mozilla/5.0 (compatible; NewsPostAuto/1.0)' },
       });
-      const cropped = await sharp(Buffer.from(dl.data)).resize(w, h, { fit: 'cover', position: 'attention' })
+      const raw = Buffer.from(dl.data);
+
+      if (fitMode === 'contain') {
+        const [backdrop, contained] = await Promise.all([
+          sharp(raw).resize(w, h, { fit: 'cover', position: 'attention' })
+            .blur(30).modulate({ brightness: 0.5 }).jpeg({ quality: 85 }).toBuffer(),
+          sharp(raw).resize(w, h, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+            .png().toBuffer(),
+        ]);
+        const composed = await sharp(backdrop)
+          .composite([{ input: contained, top: 0, left: 0 }])
+          .jpeg({ quality: 92 }).toBuffer();
+        return await applyEdgeBlur(composed, w, h);
+      }
+
+      const cropped = await sharp(raw).resize(w, h, { fit: 'cover', position: 'attention' })
         .jpeg({ quality: 90 }).toBuffer();
       return await applyEdgeBlur(cropped, w, h);
     } catch (e) {
@@ -726,17 +749,28 @@ export async function buildBrandedImage(imageUrl, headline, category, opts = {})
   const { line1, line2 } = resolveHeadlineLines(headline);
   const description = summary || makeSummary(body, 160);
 
-  // Full-bleed photo — natural colors preserved across the WHOLE canvas.
-  // This is the actual fix for "every post looks the same purple thing":
-  // the photo's own colors now drive the post's visual identity; only
-  // alpha-only or photo-sampled-tint layers ever touch it, never a fixed
-  // purple/blue wash.
-  const [photo, logoUri] = await Promise.all([
-    downloadHero(imageUrl, W, H, { r: 68, g: 58, b: 122 }),
-    getLogoDataUri(),
-  ]);
-
   const which = pickVariant([line1, line2].join(' '), isBreaking, variant);
+
+  // "Fit" not "fill" — matches Instagram's own Fit/Fill toggle. The
+  // WHOLE source photo is shown, never cropped; a blurred/darkened copy
+  // of the same photo fills any leftover space instead of flat bars.
+  // Standard only shows the photo in its top PHOTO_H strip (the rest is
+  // the colour panel), so that's the real visible canvas for the fit —
+  // fitting against the full 1080×1080 square would waste most of the
+  // visible strip on backdrop. Cinematic/Breaking are full-bleed, so
+  // they fit against the whole square.
+  const logoPromise = getLogoDataUri();
+  let photo;
+  if (which === 'standard') {
+    const stripPhoto = await downloadHero(imageUrl, W, PHOTO_H, { r: 68, g: 58, b: 122 }, 'contain');
+    photo = await sharp({ create: { width: W, height: H, channels: 3, background: { r: 11, g: 11, b: 15 } } })
+      .composite([{ input: stripPhoto, top: 0, left: 0 }])
+      .jpeg({ quality: 92 }).toBuffer();
+  } else {
+    photo = await downloadHero(imageUrl, W, H, { r: 68, g: 58, b: 122 }, 'contain');
+  }
+  const logoUri = await logoPromise;
+
   const args = { line1, line2, description, category, publishedAt, isBreaking, debug, logoUri };
   let svgBuf;
   if (which === 'standard') {
